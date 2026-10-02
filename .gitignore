@@ -1,0 +1,30 @@
+# ===== 密钥 =====
+.env
+.env.*
+
+# ===== 数据文件（体积大，可重新抓取） =====
+data/**/*.parquet
+data/**/*.csv
+data/**/*.pkl
+data/**/*.h5
+data/**/*.feather
+data/**/*.xlsx
+
+# ===== 运行产物 =====
+error_report/
+*.log
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 杂项 =====
+{*}.png

@@ -15,7 +15,7 @@ FMP_ENDPOINTS = {
         "required_params":[]
     },
     "price_volume": {
-        "url": "https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted?symbol={symbol}&from_date={from_date}&to_date={to_date}&apikey={apikey}",
+        "url": "https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted?symbol={symbol}&from={from_date}&to={to_date}&apikey={apikey}",
         "required_params": ["from_date", "to_date"],
     },
     "market_cap": {

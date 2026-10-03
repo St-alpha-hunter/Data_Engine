@@ -9,7 +9,7 @@ from fetch_data.basic_clean import CleanBasic
 
 class PriceVolume(CleanBasic):
 
-    endpoint_name = "price_volume_daily"
+    endpoint_name = "price_volume"
 
     config = {
         "required_columns": [
@@ -44,16 +44,20 @@ class PriceVolume(CleanBasic):
     #     )
 
     def _custom_validate(self):
+        # FMP 返回按日期倒序（最新在前），先转成每只股票内按日期正序，后面的收益率等时序计算才正确
+        self.raw_df = self.raw_df.sort_values(["symbol", "date"]).reset_index(drop=True)
         self._check_positive_price()
         self._check_logic_relation()
         self._check_daily_volatility()
-        self._compute_return()
+        self._compute_return()      # 必须在 _check_jump_soar 之前，后者依赖 return 列
+        self._check_jump_soar()
         self.clean_df = self.raw_df  ##把处理过的值返回给clean_df
         return self.clean_df
 
     def _check_positive_price(self):
-        check_positive_item = [ i for i in self.config["numeric_columns"]]
-        mask = ~(self.raw_df[check_positive_item] < 0).any(axis=1)
+        # 价格必须 > 0；成交量可以为 0（停牌），但不能为负。mask 为 True 的行才是异常
+        price_cols = ["adjOpen", "adjHigh", "adjLow", "adjClose"]
+        mask = (self.raw_df[price_cols] <= 0).any(axis=1) | (self.raw_df["volume"] < 0)
         self._add_error(mask, "abnormal")
 
     def _check_logic_relation(self):

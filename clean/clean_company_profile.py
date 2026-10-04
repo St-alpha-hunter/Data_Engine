@@ -5,8 +5,8 @@ from datetime import datetime
 
 from config.paths import TEM_SYMBOL
 from fetch_data.fetch import FetchData
-from fetch_data.feed_error_deputy import FeedErrorDeputy
-from fetch_data.basic_clean import CleanBasic
+from monitoring.feed_error_deputy import FeedErrorDeputy
+from clean.base_clean import CleanBasic
 
 """
 (1)每天搞一个新的Company Profile，然后去验证

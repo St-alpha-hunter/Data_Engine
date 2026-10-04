@@ -17,7 +17,7 @@
 ## Source and lineage
 
 - **写入方**：人工维护，通过 `sql/postgres/` 下的编号 SQL 文件新增或升级规则
-- **与代码的对应**：`impl` 字段指向实现这条规则的方法（目前都在 [`fetch_data/fetch_price_volume_fmp_dev.py`](../../fetch_data/fetch_price_volume_fmp_dev.py) 的 `PriceVolume` 类）。改阈值时**代码和本表要同时改**
+- **与代码的对应**：`impl` 字段指向实现这条规则的方法（目前都在 [`clean/clean_price_volume_fmp_dev.py`](../../clean/clean_price_volume_fmp_dev.py) 的 `PriceVolume` 类）。改阈值时**代码和本表要同时改**
 - **下游**：
   - `meta.quality_issues (rule_id, rule_version)` 外键引用本表
   - `meta.data_corrections (rule_id, rule_version)` 外键引用本表（规则自动处理时）

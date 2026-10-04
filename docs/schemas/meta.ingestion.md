@@ -22,13 +22,14 @@
 ## Source and lineage
 
 - **写入方**（规划中，代码尚未接入）：`fetch_data/fetch.py` 的 `FetchData`
-  1. 拉取开始时插入一行：`batch_id`、`endpoint`、`params`、`n_ticker`，`status` 自动为 `running`
+  1. 拉取开始时插入一行：`batch_id`、`endpoint`、`params`、`n_symbols`，`status` 自动为 `running`
   2. 拉取结束时用 `fetch_fmp_batch()` 返回的 `summary`、`succeed_list`、`failed_list` 回填计数、列表和 `status`、`finished_at`
   3. `FeedErrorDeputy.generate_report()` 生成错误报告后，回填 `report`
 - **上游**：FMP API（[`config/endpoints.py`](../../config/endpoints.py) 的 `FMP_ENDPOINTS`）
 - **下游**（通过 `batch_id` 引用本表）：
   - `meta.quality_issues.batch_id`
   - `meta.quarantine_records.batch_id`
+  - `meta.load_log.batch_id`（这个批次写入了哪些表、多少行）
   - `meta.data_corrections.new_batch_id`
   - ClickHouse `raw.*` / `golden.*` 的 `batch_id`（待建）
 
@@ -38,7 +39,7 @@
 |---|---|
 | `running` | 拉取进行中；如果长时间停在这里，说明程序中途崩溃 |
 | `success` | `n_failed = 0` |
-| `partial` | `0 < n_failed < n_ticker` |
+| `partial` | `0 < n_failed < n_symbols` |
 | `failed` | 全部失败，或程序中途报错 |
 
 返回空数据（`n_missing`）**不算失败**，例如股票在请求的时间段里还没上市。
@@ -50,12 +51,12 @@
 | `batch_id` | text | 否 | — | 主键。格式 `{endpoint}_{YYYYmmdd_HHMMSS}_{4位随机码}`，如 `price_volume_20261003_123000_a1b2` |
 | `endpoint` | text | 否 | — | FMP 接口名，`FMP_ENDPOINTS` 的 key |
 | `params` | jsonb | 否 | `{}` | 请求参数，如 `{"from_date": "2022-01-01", "to_date": "2025-01-01"}` |
-| `n_ticker` | integer | 否 | — | 请求的股票数 |
+| `n_symbols` | integer | 否 | — | 请求的股票数 |
 | `n_success` | integer | 否 | 0 | 成功拉到数据的股票数 |
 | `n_missing` | integer | 否 | 0 | 返回空数据的股票数 |
 | `n_failed` | integer | 否 | 0 | 失败的股票数 |
-| `failed_tickers` | text[] | 否 | `{}` | 失败的股票列表 |
-| `missing_tickers` | text[] | 否 | `{}` | 返回空数据的股票列表 |
+| `failed_symbols` | text[] | 否 | `{}` | 失败的股票列表 |
+| `missing_symbols` | text[] | 否 | `{}` | 返回空数据的股票列表 |
 | `failure_detail` | jsonb | 否 | `[]` | `failed_list` 原样存放，每项包含 `symbol / endpoint / error_type / status_code / attempts / error` |
 | `rows_fetched` | bigint | 否 | 0 | 一共拉到的行数 |
 | `status` | text | 否 | `running` | `running` / `success` / `partial` / `failed` |
@@ -70,8 +71,8 @@
 |---|---|
 | `pk_ingestion` | `batch_id` 唯一 |
 | `chk_ingestion_status` | `status` 只能是四个值之一 |
-| `chk_ingestion_n_ticker_nonneg` / `_n_success_` / `_n_missing_` / `_n_failed_` / `_rows_fetched_nonneg` | 各计数 ≥ 0 |
-| `chk_ingestion_counts_le_ticker` | `n_success + n_missing + n_failed ≤ n_ticker` |
+| `chk_ingestion_n_symbols_nonneg` / `_n_success_` / `_n_missing_` / `_n_failed_` / `_rows_fetched_nonneg` | 各计数 ≥ 0 |
+| `chk_ingestion_counts_le_symbols` | `n_success + n_missing + n_failed ≤ n_symbols` |
 | `chk_ingestion_finished_after_started` | `finished_at` 不早于 `started_at` |
 
 ### 索引
@@ -85,14 +86,14 @@
 
 ```sql
 -- 某接口最近 10 次拉取
-SELECT batch_id, status, n_ticker, n_success, n_missing, n_failed, started_at
+SELECT batch_id, status, n_symbols, n_success, n_missing, n_failed, started_at
 FROM meta.ingestion
 WHERE endpoint = 'price_volume'
 ORDER BY started_at DESC
 LIMIT 10;
 
 -- 需要处理的批次：卡住超过 1 小时的 running，以及 partial / failed
-SELECT batch_id, endpoint, status, started_at, failed_tickers
+SELECT batch_id, endpoint, status, started_at, failed_symbols
 FROM meta.ingestion
 WHERE (status = 'running' AND started_at < now() - interval '1 hour')
    OR status IN ('partial', 'failed');

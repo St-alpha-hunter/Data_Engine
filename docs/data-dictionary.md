@@ -20,7 +20,7 @@
 数据流：
 
 ```
-FMP API ──拉取──▶ raw（ClickHouse）──清洗校验──▶ 中间态 parquet ──▶ golden（ClickHouse）
+FMP API ──拉取──▶ 结构检查 ──▶ raw（ClickHouse）──清洗校验──▶ 中间态 parquet ──▶ golden（ClickHouse）
    │                                    │
    └─▶ meta.ingestion                   ├─▶ meta.quality_issues      （warning / danger 都记）
                                         └─▶ meta.quarantine_records  （danger 被阻断，不进 golden）
@@ -28,7 +28,12 @@ FMP API ──拉取──▶ raw（ClickHouse）──清洗校验──▶ 中
                                      人工/规则处理 ─▶ meta.data_corrections
                                                    │
                                      release 后由 outbox 任务写入 golden（quality_status = warning）
+
+每次写 raw / golden / quarantine ─▶ meta.load_log（写了哪张表、多少行、是否成功）
 ```
+
+raw 写入前只做**结构检查**（必需字段存在、类型可转换、`symbol` / `date` 非空），不做质量检查。
+结构检查不通过（通常是 FMP 改了接口）时整批不写 raw，`ingestion.status = 'failed'`，原始返回内容存到本地 `data/` 下排查。
 
 ---
 
@@ -40,11 +45,12 @@ FMP API ──拉取──▶ raw（ClickHouse）──清洗校验──▶ 中
 |---|---|---|---|---|
 | `meta.ingestion` | 记录每次 FMP 拉取 | 一次拉取批次 | [001](../sql/postgres/001_meta_ingestion.sql) | [ingestion](schemas/meta.ingestion.md) |
 | `meta.quality_rules` | 校验规则清单（带版本） | 一条规则的一个版本 | [002](../sql/postgres/002_meta_quality.sql) | [quality_rules](schemas/meta.quality_rules.md) |
-| `meta.quality_issues` | 校验发现的问题 | 一条记录（ticker × date）触发的一条规则 | [002](../sql/postgres/002_meta_quality.sql) | [quality_issues](schemas/meta.quality_issues.md) |
-| `meta.quarantine_records` | 被阻断、不允许直接进 golden 的数据 | 一条被隔离的记录（batch × endpoint × ticker × date） | [003](../sql/postgres/003_meta_quarantine.sql) | [quarantine_records](schemas/meta.quarantine_records.md) |
+| `meta.quality_issues` | 校验发现的问题 | 一条记录（symbol × date）触发的一条规则 | [002](../sql/postgres/002_meta_quality.sql) | [quality_issues](schemas/meta.quality_issues.md) |
+| `meta.quarantine_records` | 被阻断、不允许直接进 golden 的数据 | 一条被隔离的记录（batch × endpoint × symbol × date） | [003](../sql/postgres/003_meta_quarantine.sql) | [quarantine_records](schemas/meta.quarantine_records.md) |
 | `meta.data_corrections` | 对问题 / 隔离数据的处理记录 | 一次处理动作（只追加） | [004](../sql/postgres/004_meta_data_corrections.sql) | [data_corrections](schemas/meta.data_corrections.md) |
+| `meta.load_log` | 每个批次写入了哪些表、多少行 | 一次写表 | [006](../sql/postgres/006_meta_load_log.sql) | [load_log](schemas/meta.load_log.md) |
 
-约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)。
+`meta` schema 本身见 [000](../sql/postgres/000_schema_meta.sql)；约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)；ticker → symbol 改名见 [007](../sql/postgres/007_rename_ticker_to_symbol.sql)。新环境按 000 → 007 顺序执行即可从零重建。
 
 ### ClickHouse · `raw` / `golden`
 
@@ -60,13 +66,14 @@ FMP API ──拉取──▶ raw（ClickHouse）──清洗校验──▶ 中
 meta.ingestion (batch_id)
    ├──< meta.quality_issues.batch_id ──> meta.quality_rules (rule_id, rule_version)
    ├──< meta.quarantine_records.batch_id
+   ├──< meta.load_log.batch_id                      （每次写表）
    └──< meta.data_corrections.new_batch_id          （refetch 时的新批次）
 
 meta.data_corrections ──> meta.quarantine_records.quarantine_id   （release / discard）
                       ──> meta.quality_issues.issue_id            （refetch / manual_fix）
                       ──> meta.quality_rules (rule_id, rule_version)（规则自动处理时）
 
-meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, ticker, date) 关联，无外键
+meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, symbol, date) 关联，无外键
 ```
 
 ---
@@ -84,6 +91,8 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, ticker, dat
 | `issue_id` | bigint | 一条质量问题的编号 | 主表是 `meta.quality_issues`，自增 |
 | `quarantine_id` | bigint | 一条隔离记录的编号 | 主表是 `meta.quarantine_records`，自增 |
 | `correction_id` | bigint | 一次处理动作的编号 | 主表是 `meta.data_corrections`，自增 |
+| `load_id` | bigint | 一次写表的编号 | 主表是 `meta.load_log`，自增 |
+| `target_table` | text | 写入的目标表 | 必须带库名前缀，如 `raw.price_volume_daily`；raw 和 golden 表名相同，不带前缀分不清 |
 | `rule_id` + `rule_version` | text + integer | 校验规则及其版本 | 两者总是成对出现；`rule_id` 格式为「接口缩写 + 3 位序号」，如 `PV001`（PV = price_volume） |
 | `git_version` | text | 运行时代码的 git commit | 用于追溯是哪版代码产生的数据 |
 
@@ -91,7 +100,7 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, ticker, dat
 
 | 字段 | 类型 | 含义 | 规则 |
 |---|---|---|---|
-| `ticker` | text | 股票代码 | meta 表统一用 `ticker`；FMP 返回的数据和 raw / golden 表里沿用 FMP 的字段名 `symbol`，两者含义相同 |
+| `symbol` | text | 股票代码 | 全项目统一用 `symbol`（与 FMP 返回字段一致），meta / raw / golden 表都一样。不要再用 `ticker`；股票列表、计数类字段也用 symbol，如 `n_symbols`、`failed_symbols` |
 | `date` | date | 交易日（数据所属日期） | 美东交易日，不带时区；不是入库时间 |
 
 ### 3.3 状态与等级
@@ -105,6 +114,8 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, ticker, dat
 |  | `danger` | 不会出现在 golden 里（danger 数据都在隔离区） |
 | `ingestion.status` | `running` / `success` / `partial` / `failed` | 进行中 / 全部成功 / 部分失败 / 全部失败或中途报错。返回空数据（missing）不算失败 |
 | `quarantine_records.status` | `pending` / `released` / `discarded` | 待处理 / 已放行 / 已丢弃 |
+| `load_log.layer` | `raw` / `golden` / `quarantine` | 写入的是哪一层 |
+| `load_log.status` | `success` / `failed` | 这次写表是否成功；`failed` 必须带 `error` |
 | `data_corrections.action` | `release` / `discard` / `refetch` / `manual_fix` | 放行隔离数据 / 丢弃隔离数据 / 重新拉取 / 人工修正数值 |
 
 **默认读取口径**：golden 默认读 `health` + `warning`。只要"最干净"的数据时，再手动加 `WHERE quality_status = 'health'`。不要默认只读 `health`，否则会把财报日、危机日等真实极端行情排除掉，导致回测偏差。
@@ -132,6 +143,7 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, ticker, dat
 | `resolved_at` | 隔离记录被处理（放行或丢弃）的时间 |
 | `golden_written_at` | 被放行的数据写入 golden 的时间（outbox 标记） |
 | `corrected_at` | 处理动作发生的时间 |
+| `loaded_at` | 写表的时间 |
 | `created_at` | 记录创建时间（规则表） |
 | `ingested_at` | 数据入库时间（ClickHouse 表，待建） |
 

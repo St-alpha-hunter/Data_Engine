@@ -1,9 +1,9 @@
 import numpy as np
-from fetch_data.basic_clean import CleanBasic
+from clean.base_clean import CleanBasic
 
 class IncomeSheetYear(CleanBasic):
 
-    endpoint_name = "income_sheet_yearly"
+    endpoint_name = "income_statement"
 
     config = {
             "required_columns" :[

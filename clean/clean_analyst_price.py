@@ -1,21 +1,20 @@
-import pandas as pd
 import logging
-from dotenv import load_dotenv
+from datetime import datetime
+
+import pandas as pd
+
 from config.endpoints import API_KEY
 from config.paths import ANALYST_GRADES
-from fetch_data.fetch import fetch_fmp_batch
+from fetch_data.fetch import FetchData
 
-load_dotenv()
 log = logging.getLogger(__name__)
-if not API_KEY:
-    raise ValueError("FMP_API_KEY NOT SET IN")
 
-df_raw, summary, succeed, failed = fetch_fmp_batch(
-    symbols = ["AAPL", "MSFT"],
-    endpoint_name = "cash_flow",
-    extra_params={
-    }
-)
+"""
+
+分析师评级历史（FMP grades-historical）：空架子，清洗逻辑待实现。文件末尾是 FMP 返回的样例数据，作为字段参考。
+
+"""
+
 
 def clean(df:pd.DataFrame):
     pass
@@ -24,11 +23,27 @@ def compute(df:pd.DataFrame):
     pass
 
 def save_file(df:pd.DataFrame):
-    df["date"] = pd.to_datetime(df["datetime"])
-    df = df.set_index(["symbols","date"], inplace=False)
-    df = df.sort_values(by=["date"], ascending=True)
-    df.to_parquet(ANALYST_GRADES)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index(["symbol", "date"]).sort_index()
+    ANALYST_GRADES.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(ANALYST_GRADES / f"{datetime.now():%Y%m%d_%H%M%S}.parquet")
     return df
+
+
+# 临时入口：拉取并保存，pipelines 完成后改由 pipeline 调用
+if __name__ == "__main__":
+    if not API_KEY:
+        raise ValueError("FMP_API_KEY NOT SET IN")
+
+    with FetchData(
+        symbols=["AAPL", "MSFT"],
+        endpoint_name="analyst_grades",
+        extra_params=None
+    ) as fetchData:
+        df_raw, summary, succeed, failed = fetchData.fetch_fmp_batch()
+
+    print(summary)
+    print("运行成功")
 
 
 """

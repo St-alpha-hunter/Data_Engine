@@ -11,6 +11,10 @@ MetaStore：数据治理工具表（PostgreSQL meta schema）的读写
         df, summary, succeed, failed = fetcher.fetch_fmp_batch()
         run.finish(summary, failed, rows_fetched=len(df))
 
+    # 写表时记录 load_log
+    with store.load_step(run.batch_id, "raw", "raw.price_volume_daily") as step:
+        step.rows = ch.insert_df("raw.price_volume_daily", df)
+
     # 简便写法：装饰器
     @track_ingestion("price_volume")
     def fetch_price_volume(symbols, from_date, to_date): ...
@@ -21,6 +25,7 @@ import json
 import logging
 import secrets
 import subprocess
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -117,7 +122,7 @@ class IngestionRun:
     def __enter__(self) -> "IngestionRun":
         self.store.conn.execute(
             """
-            INSERT INTO meta.ingestion (batch_id, endpoint, params, n_ticker, git_version)
+            INSERT INTO meta.ingestion (batch_id, endpoint, params, n_symbols, git_version)
             VALUES (%s, %s, %s, %s, %s)
             """,
             (self.batch_id, self.endpoint, _jsonb(self.params), len(self.symbols), current_git_version()),
@@ -143,8 +148,8 @@ class IngestionRun:
             "n_success": summary.get("success", 0),
             "n_missing": summary.get("missing", 0),
             "n_failed": n_failed,
-            "failed_tickers": [f["symbol"] for f in failed_list],
-            "missing_tickers": list(summary.get("missing_symbols", [])),
+            "failed_symbols": [f["symbol"] for f in failed_list],
+            "missing_symbols": list(summary.get("missing_symbols", [])),
             "failure_detail": failed_list,
             "rows_fetched": rows_fetched,
             "status": status,
@@ -160,7 +165,7 @@ class IngestionRun:
         if exc_type is not None:
             result = {
                 "n_success": 0, "n_missing": 0, "n_failed": 0,
-                "failed_tickers": [], "missing_tickers": [], "rows_fetched": 0,
+                "failed_symbols": [], "missing_symbols": [], "rows_fetched": 0,
                 **(self._result or {}),
                 "status": "failed",
             }
@@ -171,7 +176,7 @@ class IngestionRun:
         elif self._result is None:
             result = {
                 "n_success": 0, "n_missing": 0, "n_failed": 0,
-                "failed_tickers": [], "missing_tickers": [], "rows_fetched": 0,
+                "failed_symbols": [], "missing_symbols": [], "rows_fetched": 0,
                 "status": "failed",
                 "failure_detail": [{"error_type": "not_finished", "error": "退出 with 前没有调用 run.finish()"}],
             }
@@ -183,7 +188,7 @@ class IngestionRun:
             """
             UPDATE meta.ingestion
             SET n_success = %(n_success)s, n_missing = %(n_missing)s, n_failed = %(n_failed)s,
-                failed_tickers = %(failed_tickers)s, missing_tickers = %(missing_tickers)s,
+                failed_symbols = %(failed_symbols)s, missing_symbols = %(missing_symbols)s,
                 failure_detail = %(failure_detail)s, rows_fetched = %(rows_fetched)s,
                 status = %(status)s, finished_at = now(), report = %(report)s
             WHERE batch_id = %(batch_id)s
@@ -193,6 +198,12 @@ class IngestionRun:
         )
         log.info(f"[{self.endpoint}] 批次结束 {self.batch_id}：{result['status']}")
         return False  # 不吞异常
+
+
+class _LoadStep:
+    """load_step() 的状态容器：块内把实际写入行数赋给 rows"""
+    def __init__(self):
+        self.rows = 0
 
 
 # =========================
@@ -210,6 +221,40 @@ class MetaStore:
     def get_ingestion(self, batch_id: str) -> dict | None:
         with self.conn.cursor(row_factory=dict_row) as cur:
             return cur.execute("SELECT * FROM meta.ingestion WHERE batch_id = %s", (batch_id,)).fetchone()
+
+    # ---------- load_log ----------
+    def log_load(self, batch_id: str, layer: str, target_table: str, rows_written: int = 0,
+                 status: str = "success", error: str | None = None) -> int:
+        """记录一次写表：哪个批次、哪一层、哪张表、写了多少行。返回 load_id。"""
+        return self.conn.execute(
+            """
+            INSERT INTO meta.load_log (batch_id, layer, target_table, rows_written, status, error)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING load_id
+            """,
+            (batch_id, layer, target_table, int(rows_written), status, error),
+        ).fetchone()[0]
+
+    @contextmanager
+    def load_step(self, batch_id: str, layer: str, target_table: str):
+        """
+        with 写法：块内把写入行数赋给 step.rows；正常退出记 success，出异常记 failed 并继续抛出
+            with store.load_step(batch_id, "raw", "raw.price_volume_daily") as step:
+                step.rows = ch.insert_df("raw.price_volume_daily", df)
+        """
+        step = _LoadStep()
+        try:
+            yield step
+        except Exception as e:
+            self.log_load(batch_id, layer, target_table, step.rows, "failed", f"{type(e).__name__}: {e}")
+            raise
+        self.log_load(batch_id, layer, target_table, step.rows, "success")
+
+    def get_loads(self, batch_id: str) -> list[dict]:
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            return cur.execute(
+                "SELECT * FROM meta.load_log WHERE batch_id = %s ORDER BY load_id", (batch_id,)
+            ).fetchall()
 
     # ---------- quality_rules ----------
     def active_rules(self, endpoint: str) -> dict[str, dict]:
@@ -230,12 +275,12 @@ class MetaStore:
     def record_issues(self, batch_id: str, issues: list[dict]) -> int:
         """
         批量写入质量问题，同一批次重复的问题自动跳过。返回实际新增的行数。
-        每项需要：rule_id, rule_version, severity, ticker, date（可为空）, detail（可选）
+        每项需要：rule_id, rule_version, severity, symbol, date（可为空）, detail（可选）
         """
         if not issues:
             return 0
         rows = [
-            (batch_id, i["rule_id"], i["rule_version"], i["severity"], i["ticker"],
+            (batch_id, i["rule_id"], i["rule_version"], i["severity"], i["symbol"],
              _to_date(i.get("date")), _jsonb(i.get("detail", {})))
             for i in issues
         ]
@@ -243,7 +288,7 @@ class MetaStore:
             before = cur.execute("SELECT count(*) FROM meta.quality_issues WHERE batch_id = %s", (batch_id,)).fetchone()[0]
             cur.executemany(
                 """
-                INSERT INTO meta.quality_issues (batch_id, rule_id, rule_version, severity, ticker, date, detail)
+                INSERT INTO meta.quality_issues (batch_id, rule_id, rule_version, severity, symbol, date, detail)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
@@ -256,16 +301,16 @@ class MetaStore:
     def quarantine(self, batch_id: str, endpoint: str, records: list[dict]) -> int:
         """
         把 danger 数据放进隔离区，同一条数据重复隔离自动跳过。返回实际新增的行数。
-        每项需要：ticker, date, record（整行原始数据 dict）
+        每项需要：symbol, date, record（整行原始数据 dict）
         """
         if not records:
             return 0
-        rows = [(batch_id, endpoint, r["ticker"], _to_date(r["date"]), _jsonb(r["record"])) for r in records]
+        rows = [(batch_id, endpoint, r["symbol"], _to_date(r["date"]), _jsonb(r["record"])) for r in records]
         with self.conn.transaction(), self.conn.cursor() as cur:
             before = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,)).fetchone()[0]
             cur.executemany(
                 """
-                INSERT INTO meta.quarantine_records (batch_id, endpoint, ticker, date, record)
+                INSERT INTO meta.quarantine_records (batch_id, endpoint, symbol, date, record)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
@@ -310,7 +355,7 @@ class MetaStore:
     def pending_outbox(self, endpoint: str | None = None, limit: int = 1000) -> list[dict]:
         """已放行、但还没写入 golden 的隔离数据"""
         sql = """
-            SELECT quarantine_id, batch_id, endpoint, ticker, date, record
+            SELECT quarantine_id, batch_id, endpoint, symbol, date, record
             FROM meta.quarantine_records
             WHERE status = 'released' AND golden_written_at IS NULL
         """

@@ -13,11 +13,11 @@
 
 ## Grain
 
-**一行 = 一条被隔离的数据（batch × endpoint × ticker × date）**。
+**一行 = 一条被隔离的数据（batch × endpoint × symbol × date）**。
 
-同一条数据同时触发多条 danger 规则，**只隔离一次**；触发了哪些规则，用 `(batch_id, ticker, date)` 去 `meta.quality_issues` 查。
+同一条数据同时触发多条 danger 规则，**只隔离一次**；触发了哪些规则，用 `(batch_id, symbol, date)` 去 `meta.quality_issues` 查。
 
-主键：`quarantine_id`（自增）。唯一键：`(batch_id, endpoint, ticker, date)`。
+主键：`quarantine_id`（自增）。唯一键：`(batch_id, endpoint, symbol, date)`。
 
 ## Source and lineage
 
@@ -46,7 +46,7 @@ pending ──release()──▶ released ──outbox 任务──▶ released 
 | `quarantine_id` | bigint | 否 | 自增 | 主键 |
 | `batch_id` | text | 否 | — | 哪一次拉取的数据 |
 | `endpoint` | text | 否 | — | 数据类别，如 `price_volume` |
-| `ticker` | text | 否 | — | 股票代码 |
+| `symbol` | text | 否 | — | 股票代码 |
 | `date` | date | 否 | — | 交易日 |
 | `record` | jsonb | 否 | — | 被阻断的整行原始数据，如 `{"adjOpen": 0, "adjHigh": 175.3, ...}` |
 | `status` | text | 否 | `pending` | `pending` / `released` / `discarded` |
@@ -59,7 +59,7 @@ pending ──release()──▶ released ──outbox 任务──▶ released 
 | 约束名 | 规则 |
 |---|---|
 | `pk_quarantine_records` | `quarantine_id` 唯一 |
-| `uq_quarantine_records_record` | `(batch_id, endpoint, ticker, date)` 唯一，同一条数据只隔离一次 |
+| `uq_quarantine_records_record` | `(batch_id, endpoint, symbol, date)` 唯一，同一条数据只隔离一次 |
 | `fk_quarantine_records_batch` | `batch_id` 必须存在于 `meta.ingestion` |
 | `chk_quarantine_status` | `status` 只能是三个值之一 |
 | `chk_quarantine_resolved_iff_not_pending` | `pending` 时 `resolved_at` 必须为空；`released` / `discarded` 时必须有值 |
@@ -72,23 +72,23 @@ pending ──release()──▶ released ──outbox 任务──▶ released 
 |---|---|
 | `idx_quarantine_outbox` (`resolved_at`) WHERE `status = 'released' AND golden_written_at IS NULL` | outbox 任务扫描待写入的数据 |
 | `idx_quarantine_pending` (`quarantined_at`) WHERE `status = 'pending'` | 列出待处理队列 |
-| `idx_quarantine_ticker_date` (`ticker, date`) | 按股票、日期查 |
+| `idx_quarantine_symbol_date` (`symbol, date`) | 按股票、日期查 |
 
 ## 常用查询
 
 ```sql
 -- 待处理队列，附带触发的规则
-SELECT q.quarantine_id, q.ticker, q.date, q.record,
+SELECT q.quarantine_id, q.symbol, q.date, q.record,
        array_agg(i.rule_id ORDER BY i.rule_id) AS rules
 FROM meta.quarantine_records q
 JOIN meta.quality_issues i
-  ON i.batch_id = q.batch_id AND i.ticker = q.ticker AND i.date = q.date
+  ON i.batch_id = q.batch_id AND i.symbol = q.symbol AND i.date = q.date
 WHERE q.status = 'pending'
 GROUP BY q.quarantine_id
 ORDER BY q.quarantined_at;
 
 -- outbox：已放行但还没写入 golden
-SELECT quarantine_id, endpoint, ticker, date, record
+SELECT quarantine_id, endpoint, symbol, date, record
 FROM meta.quarantine_records
 WHERE status = 'released' AND golden_written_at IS NULL;
 ```

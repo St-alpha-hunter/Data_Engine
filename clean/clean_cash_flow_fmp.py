@@ -1,10 +1,10 @@
 import numpy as np
-from fetch_data.basic_clean import CleanBasic
+from clean.base_clean import CleanBasic
 
 
 class CashFlowYear(CleanBasic):
 
-    endpoint_name = "cash_flow_yearly"
+    endpoint_name = "cash_flow"
 
     config = {
         "required_columns":[

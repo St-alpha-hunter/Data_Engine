@@ -1,9 +1,9 @@
 import numpy as np
-from fetch_data.basic_clean import CleanBasic
+from clean.base_clean import CleanBasic
 
 class BalanceSheetYear(CleanBasic):
 
-    endpoint_name = "balance_sheet_yearly"
+    endpoint_name = "balance_sheet"
 
     config = {
         "required_columns":[

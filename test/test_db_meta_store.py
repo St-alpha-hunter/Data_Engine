@@ -18,7 +18,7 @@ PostgreSQL 没启动时自动跳过。
 
 TEST_DB = "data_engine_test"
 MIGRATIONS = sorted((BASE_DIR / "sql" / "postgres").glob("*.sql"))
-META_TABLES = "meta.data_corrections, meta.quarantine_records, meta.quality_issues, meta.ingestion"
+META_TABLES = "meta.load_log, meta.data_corrections, meta.quarantine_records, meta.quality_issues, meta.ingestion"
 
 
 # =========================
@@ -69,7 +69,8 @@ def make_batch(store, symbols=("AAPL", "MSFT")):
 def test_migrations_build_all_tables(conn):
     tables = {r[0] for r in conn.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'meta'")}
-    assert tables == {"ingestion", "quality_rules", "quality_issues", "quarantine_records", "data_corrections"}
+    assert tables == {"ingestion", "quality_rules", "quality_issues", "quarantine_records",
+                      "data_corrections", "load_log"}
 
 
 def test_new_batch_id_format():
@@ -95,10 +96,10 @@ def test_ingestion_status(store, summary, failed_list, expected):
 
     row = store.get_ingestion(run.batch_id)
     assert row["status"] == expected
-    assert row["n_ticker"] == 3
+    assert row["n_symbols"] == 3
     assert row["rows_fetched"] == 40
-    assert row["failed_tickers"] == [f["symbol"] for f in failed_list]
-    assert row["missing_tickers"] == summary.get("missing_symbols", [])
+    assert row["failed_symbols"] == [f["symbol"] for f in failed_list]
+    assert row["missing_symbols"] == summary.get("missing_symbols", [])
     assert row["params"] == {"from_date": "2022-01-01"}
     assert row["finished_at"] is not None
 
@@ -163,6 +164,64 @@ def test_track_ingestion_requires_symbols():
 
 
 # =========================
+# ✅ load_log
+# =========================
+def test_log_load_and_reconcile(store):
+    batch_id = make_batch(store)
+    store.log_load(batch_id, "raw", "raw.price_volume_daily", 40)
+    store.log_load(batch_id, "golden", "golden.price_volume_daily", 38)
+    store.log_load(batch_id, "quarantine", "meta.quarantine_records", 2)
+
+    loads = store.get_loads(batch_id)
+    assert [(l["layer"], l["rows_written"], l["status"]) for l in loads] == [
+        ("raw", 40, "success"), ("golden", 38, "success"), ("quarantine", 2, "success")]
+
+
+def test_load_step_success(store):
+    batch_id = make_batch(store)
+    with store.load_step(batch_id, "raw", "raw.price_volume_daily") as step:
+        step.rows = 40
+    [load] = store.get_loads(batch_id)
+    assert (load["status"], load["rows_written"], load["error"]) == ("success", 40, None)
+
+
+def test_load_step_failure_logged_and_reraised(store):
+    batch_id = make_batch(store)
+    with pytest.raises(ConnectionError, match="ClickHouse 挂了"):
+        with store.load_step(batch_id, "raw", "raw.price_volume_daily") as step:
+            step.rows = 10          # 写了一部分后失败
+            raise ConnectionError("ClickHouse 挂了")
+    [load] = store.get_loads(batch_id)
+    assert load["status"] == "failed"
+    assert load["rows_written"] == 10
+    assert "ClickHouse 挂了" in load["error"]
+
+
+def test_load_step_retry_keeps_history(store):
+    """失败后重试：failed 和 success 两条都保留"""
+    batch_id = make_batch(store)
+    with pytest.raises(RuntimeError):
+        with store.load_step(batch_id, "raw", "raw.price_volume_daily"):
+            raise RuntimeError("第一次失败")
+    with store.load_step(batch_id, "raw", "raw.price_volume_daily") as step:
+        step.rows = 40
+    assert [l["status"] for l in store.get_loads(batch_id)] == ["failed", "success"]
+
+
+@pytest.mark.parametrize("kwargs, constraint", [
+    ({"layer": "bronze"}, "chk_load_log_layer"),
+    ({"target_table": "price_volume_daily"}, "chk_load_log_table_qualified"),
+    ({"status": "failed"}, "chk_load_log_error_iff_failed"),
+    ({"error": "成功却带错误信息"}, "chk_load_log_error_iff_failed"),
+])
+def test_log_load_constraints(store, kwargs, constraint):
+    batch_id = make_batch(store)
+    args = {"layer": "raw", "target_table": "raw.price_volume_daily", "rows_written": 1, **kwargs}
+    with pytest.raises(psycopg.errors.CheckViolation, match=constraint):
+        store.log_load(batch_id, **args)
+
+
+# =========================
 # ✅ 规则
 # =========================
 def test_active_rules(store):
@@ -178,11 +237,11 @@ def test_active_rules(store):
 def test_record_issues_dedup(store):
     batch_id = make_batch(store)
     issues = [
-        {"rule_id": "PV001", "rule_version": 1, "severity": "danger", "ticker": "AAPL",
+        {"rule_id": "PV001", "rule_version": 1, "severity": "danger", "symbol": "AAPL",
          "date": pd.Timestamp("2022-01-03"), "detail": {"adjLow": 0.0, "volume": np.int64(100)}},
-        {"rule_id": "PV003", "rule_version": 1, "severity": "warning", "ticker": "MSFT",
+        {"rule_id": "PV003", "rule_version": 1, "severity": "warning", "symbol": "MSFT",
          "date": "2022-01-04", "detail": {"range": float("nan")}},
-        {"rule_id": "PV004", "rule_version": 1, "severity": "warning", "ticker": "MSFT", "date": None},
+        {"rule_id": "PV004", "rule_version": 1, "severity": "warning", "symbol": "MSFT", "date": None},
     ]
     assert store.record_issues(batch_id, issues) == 3
     assert store.record_issues(batch_id, issues) == 0   # 重复校验不重复记录
@@ -196,7 +255,7 @@ def test_record_issues_unknown_rule_rejected(store):
     batch_id = make_batch(store)
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         store.record_issues(batch_id, [{"rule_id": "PV999", "rule_version": 1, "severity": "danger",
-                                        "ticker": "AAPL", "date": "2022-01-03"}])
+                                        "symbol": "AAPL", "date": "2022-01-03"}])
 
 
 # =========================
@@ -205,11 +264,11 @@ def test_record_issues_unknown_rule_rejected(store):
 def quarantine_two(store):
     batch_id = make_batch(store)
     n = store.quarantine(batch_id, "price_volume", [
-        {"ticker": "AAPL", "date": "2022-01-03", "record": {"adjLow": 0.0, "date": pd.Timestamp("2022-01-03")}},
-        {"ticker": "MSFT", "date": "2022-01-03", "record": {"adjHigh": -1.0}},
+        {"symbol": "AAPL", "date": "2022-01-03", "record": {"adjLow": 0.0, "date": pd.Timestamp("2022-01-03")}},
+        {"symbol": "MSFT", "date": "2022-01-03", "record": {"adjHigh": -1.0}},
     ])
     ids = [r[0] for r in store.conn.execute(
-        "SELECT quarantine_id FROM meta.quarantine_records ORDER BY ticker")]
+        "SELECT quarantine_id FROM meta.quarantine_records ORDER BY symbol")]
     return batch_id, n, ids
 
 
@@ -217,7 +276,7 @@ def test_quarantine_dedup(store):
     batch_id, n, ids = quarantine_two(store)
     assert n == 2
     assert store.quarantine(batch_id, "price_volume", [
-        {"ticker": "AAPL", "date": "2022-01-03", "record": {}}]) == 0
+        {"symbol": "AAPL", "date": "2022-01-03", "record": {}}]) == 0
 
 
 def test_release_and_outbox(store):

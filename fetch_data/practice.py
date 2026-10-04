@@ -7,4 +7,5 @@ def cumpord(fields:list[str]):
     return wrap
 
 
-def excutte(sel)
+def excutte(sel):
+    pass

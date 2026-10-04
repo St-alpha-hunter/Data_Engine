@@ -17,21 +17,21 @@
 
 ## Grain
 
-**一行 = 一条记录（ticker × date）在一个批次里触发的一条规则**。
+**一行 = 一条记录（symbol × date）在一个批次里触发的一条规则**。
 
 同一条记录触发两条规则，就是两行。股票层面的问题（不对应具体某一天）`date` 为空。
 
-主键：`issue_id`（自增）。唯一键：`(batch_id, rule_id, ticker, date)`，同一批数据重复校验不会重复记录。
+主键：`issue_id`（自增）。唯一键：`(batch_id, rule_id, symbol, date)`，同一批数据重复校验不会重复记录。
 
 ## Source and lineage
 
-- **写入方**（规划中，代码尚未接入）：`fetch_data/basic_clean.py` 的 `CleanBasic._add_error()`，以及各子类的 `_check_*` 方法。目前 `_add_error` 只把错误行存在内存里的 `self.errors`，之后会改为同时写入本表
+- **写入方**（规划中，代码尚未接入）：[`clean/base_clean.py`](../../clean/base_clean.py) 的 `CleanBasic._add_error()`，以及各子类的 `_check_*` 方法。目前 `_add_error` 只把错误行存在内存里的 `self.errors`，之后会改为同时写入本表
 - **上游**：
   - `batch_id` → `meta.ingestion`
   - `(rule_id, rule_version)` → `meta.quality_rules`
 - **下游**：
   - `meta.data_corrections.issue_id` 引用本表（refetch / manual_fix）
-  - 与 `meta.quarantine_records` 通过 `(batch_id, ticker, date)` 关联（无外键）
+  - 与 `meta.quarantine_records` 通过 `(batch_id, symbol, date)` 关联（无外键）
 
 `severity` 是从 `quality_rules` 冗余过来的，方便直接筛选 `danger`，不用每次 JOIN 规则表。
 
@@ -44,7 +44,7 @@
 | `rule_id` | text | 否 | — | 规则编号，如 `PV001` |
 | `rule_version` | integer | 否 | — | 规则版本 |
 | `severity` | text | 否 | — | `warning` / `danger` |
-| `ticker` | text | 否 | — | 股票代码 |
+| `symbol` | text | 否 | — | 股票代码 |
 | `date` | date | 是 | — | 出问题的交易日；股票层面的问题为空 |
 | `detail` | jsonb | 否 | `{}` | 出问题的具体数值，如 `{"adjLow": 0, "adjHigh": 175.3}` |
 | `detected_at` | timestamptz | 否 | `now()` | 发现时间（UTC） |
@@ -62,8 +62,8 @@
 
 | 索引 | 用途 |
 |---|---|
-| `uq_quality_issues_dedup` (`batch_id, rule_id, ticker, date`) NULLS NOT DISTINCT | 去重；`date` 为空也视为相同 |
-| `idx_quality_issues_ticker_date` (`ticker, date`) | 按股票、日期查 |
+| `uq_quality_issues_dedup` (`batch_id, rule_id, symbol, date`) NULLS NOT DISTINCT | 去重；`date` 为空也视为相同 |
+| `idx_quality_issues_symbol_date` (`symbol, date`) | 按股票、日期查 |
 | `idx_quality_issues_rule` (`rule_id, detected_at DESC`) | 按规则看最近的触发情况 |
 
 ## 常用查询
@@ -73,7 +73,7 @@
 SELECT i.rule_id, i.rule_version, i.severity, r.description, i.detail, i.batch_id
 FROM meta.quality_issues i
 JOIN meta.quality_rules r USING (rule_id, rule_version)
-WHERE i.ticker = 'AAPL' AND i.date = '2022-03-01';
+WHERE i.symbol = 'AAPL' AND i.date = '2022-03-01';
 
 -- 各规则最近 30 天触发次数
 SELECT rule_id, severity, count(*) AS n

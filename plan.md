@@ -18,7 +18,11 @@
 (4)data_corrections 记下来最终判定、处理人/规则版本、重跑批次、修复时间。
     issue_id, action(release/discard/refetch/manual_fix), new_batch_id
 
-(5) 另外每张golden表记下来  
+(5)每张 raw表记下来
+batch_id
+source_logic_version
+
+(6) 另外每张golden表记下来  
 
 a. data_version记下数据版次（通常都是1，除非大规模重构我们再升级去2）
 b, is_current(现在是否在使用),  

@@ -222,21 +222,26 @@ class MetaStore:
         with self.conn.cursor(row_factory=dict_row) as cur:
             return cur.execute("SELECT * FROM meta.ingestion WHERE batch_id = %s", (batch_id,)).fetchone()
 
+    def set_report(self, batch_id: str, report_path) -> None:
+        """清洗阶段生成错误报告后，回填到 ingestion.report（批次在 B 步骤已经结束）"""
+        self.conn.execute("UPDATE meta.ingestion SET report = %s WHERE batch_id = %s", (str(report_path), batch_id))
+
     # ---------- load_log ----------
     def log_load(self, batch_id: str, layer: str, target_table: str, rows_written: int = 0,
-                 status: str = "success", error: str | None = None) -> int:
-        """记录一次写表：哪个批次、哪一层、哪张表、写了多少行。返回 load_id。"""
+                 status: str = "success", error: str | None = None, location: str | None = None) -> int:
+        """记录一次写表：哪个批次、哪一层、哪张表、写了多少行。返回 load_id。
+        layer='intermediate' 时必须给 location（parquet 文件地址）。"""
         return self.conn.execute(
             """
-            INSERT INTO meta.load_log (batch_id, layer, target_table, rows_written, status, error)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO meta.load_log (batch_id, layer, target_table, rows_written, status, error, location)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING load_id
             """,
-            (batch_id, layer, target_table, int(rows_written), status, error),
+            (batch_id, layer, target_table, int(rows_written), status, error, location),
         ).fetchone()[0]
 
     @contextmanager
-    def load_step(self, batch_id: str, layer: str, target_table: str):
+    def load_step(self, batch_id: str, layer: str, target_table: str, location: str | None = None):
         """
         with 写法：块内把写入行数赋给 step.rows；正常退出记 success，出异常记 failed 并继续抛出
             with store.load_step(batch_id, "raw", "raw.price_volume_daily") as step:
@@ -246,9 +251,9 @@ class MetaStore:
         try:
             yield step
         except Exception as e:
-            self.log_load(batch_id, layer, target_table, step.rows, "failed", f"{type(e).__name__}: {e}")
+            self.log_load(batch_id, layer, target_table, step.rows, "failed", f"{type(e).__name__}: {e}", location)
             raise
-        self.log_load(batch_id, layer, target_table, step.rows, "success")
+        self.log_load(batch_id, layer, target_table, step.rows, "success", location=location)
 
     def get_loads(self, batch_id: str) -> list[dict]:
         with self.conn.cursor(row_factory=dict_row) as cur:
@@ -271,12 +276,88 @@ class MetaStore:
             ).fetchall()
         return {r.pop("rule_id"): r for r in rows}
 
-    # ---------- quality_issues ----------
+    def sync_rules(self, rules: list[dict]) -> dict[str, list[str]]:
+        """
+        把代码里定义的规则同步到 meta.quality_rules（规则以代码为准）。
+        rules 用 CleanBasic.rule_definitions() 生成。
+            - 数据库里没有这个版本：插入，并把同一规则的旧版本设为不生效
+            - 数据库里已有这个版本：severity / params 必须一致，否则报错（改了规则必须升版本号）
+            - 代码版本低于数据库里的最高版本：报错（防止旧代码覆盖新规则）
+        返回 {"inserted": [...], "upgraded": [...], "unchanged": [...]}
+        """
+        result = {"inserted": [], "upgraded": [], "unchanged": []}
+        with self.conn.transaction(), self.conn.cursor(row_factory=dict_row) as cur:
+            for r in rules:
+                rule_id, version = r["rule_id"], r["rule_version"]
+                existing = cur.execute(
+                    "SELECT * FROM meta.quality_rules WHERE rule_id = %s ORDER BY rule_version", (rule_id,)
+                ).fetchall()
+                max_version = max((e["rule_version"] for e in existing), default=0)
+                same = next((e for e in existing if e["rule_version"] == version), None)
+
+                if existing and existing[0]["endpoint"] != r["endpoint"]:
+                    raise ValueError(f"{rule_id} 在数据库里属于 {existing[0]['endpoint']}，代码里是 {r['endpoint']}，规则编号冲突")
+
+                if same is not None:
+                    if same["severity"] != r["severity"] or same["params"] != r["params"]:
+                        raise ValueError(
+                            f"{rule_id} v{version} 的 severity/params 与数据库登记的不一致"
+                            f"（数据库：{same['severity']} {same['params']}；代码：{r['severity']} {r['params']}）。"
+                            f"改了规则请把版本号升到 v{max_version + 1}"
+                        )
+                    if version < max_version:
+                        raise ValueError(f"{rule_id} 代码版本 v{version} 低于数据库最高版本 v{max_version}，请先更新代码")
+                    result["unchanged"].append(rule_id)
+                    continue
+
+                if version < max_version:
+                    raise ValueError(f"{rule_id} 代码版本 v{version} 低于数据库最高版本 v{max_version}，请先更新代码")
+
+                # 先关旧版本再插新版本（每条规则只能有一个生效版本）
+                cur.execute("UPDATE meta.quality_rules SET is_active = false WHERE rule_id = %s AND is_active", (rule_id,))
+                cur.execute(
+                    """
+                    INSERT INTO meta.quality_rules (rule_id, rule_version, endpoint, description, severity, params, impl)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (rule_id, version, r["endpoint"], r["description"], r["severity"], _jsonb(r["params"]), r.get("impl")),
+                )
+                result["upgraded" if existing else "inserted"].append(rule_id)
+
+        if result["inserted"] or result["upgraded"]:
+            log.info(f"规则同步：新增 {result['inserted']}，升级 {result['upgraded']}")
+        return result
+
+    # ---------- quality_issues / quarantine_records ----------
     def record_issues(self, batch_id: str, issues: list[dict]) -> int:
         """
-        批量写入质量问题，同一批次重复的问题自动跳过。返回实际新增的行数。
+        批量写入质量问题，同一批次、同一规则版本重复的问题自动跳过。返回实际新增的行数。
         每项需要：rule_id, rule_version, severity, symbol, date（可为空）, detail（可选）
         """
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            return self._insert_issues(cur, batch_id, issues)
+
+    def quarantine(self, batch_id: str, endpoint: str, records: list[dict]) -> int:
+        """
+        把 danger 数据放进隔离区，同一条数据重复隔离自动跳过。返回实际新增的行数。
+        每项需要：symbol, date, record（整行原始数据 dict）
+        """
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            return self._insert_quarantine(cur, batch_id, endpoint, records)
+
+    def record_validation(self, batch_id: str, endpoint: str, issues: list[dict], records: list[dict]) -> tuple[int, int]:
+        """
+        清洗校验的结果一次写入：质量问题 + 隔离数据放在同一个事务里，要么都成功，要么都不生效。
+        （分开写的话，中途失败会出现"问题记下了、数据却没进隔离区"，那些 danger 行既不在隔离区也不在 golden，凭空消失）
+        返回 (新增问题数, 新增隔离数)
+        """
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            n_issues = self._insert_issues(cur, batch_id, issues)
+            n_quarantined = self._insert_quarantine(cur, batch_id, endpoint, records)
+        return n_issues, n_quarantined
+
+    @staticmethod
+    def _insert_issues(cur, batch_id: str, issues: list[dict]) -> int:
         if not issues:
             return 0
         rows = [
@@ -284,39 +365,33 @@ class MetaStore:
              _to_date(i.get("date")), _jsonb(i.get("detail", {})))
             for i in issues
         ]
-        with self.conn.transaction(), self.conn.cursor() as cur:
-            before = cur.execute("SELECT count(*) FROM meta.quality_issues WHERE batch_id = %s", (batch_id,)).fetchone()[0]
-            cur.executemany(
-                """
-                INSERT INTO meta.quality_issues (batch_id, rule_id, rule_version, severity, symbol, date, detail)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                """,
-                rows,
-            )
-            after = cur.execute("SELECT count(*) FROM meta.quality_issues WHERE batch_id = %s", (batch_id,)).fetchone()[0]
+        before = cur.execute("SELECT count(*) FROM meta.quality_issues WHERE batch_id = %s", (batch_id,)).fetchone()[0]
+        cur.executemany(
+            """
+            INSERT INTO meta.quality_issues (batch_id, rule_id, rule_version, severity, symbol, date, detail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            rows,
+        )
+        after = cur.execute("SELECT count(*) FROM meta.quality_issues WHERE batch_id = %s", (batch_id,)).fetchone()[0]
         return after - before
 
-    # ---------- quarantine_records ----------
-    def quarantine(self, batch_id: str, endpoint: str, records: list[dict]) -> int:
-        """
-        把 danger 数据放进隔离区，同一条数据重复隔离自动跳过。返回实际新增的行数。
-        每项需要：symbol, date, record（整行原始数据 dict）
-        """
+    @staticmethod
+    def _insert_quarantine(cur, batch_id: str, endpoint: str, records: list[dict]) -> int:
         if not records:
             return 0
         rows = [(batch_id, endpoint, r["symbol"], _to_date(r["date"]), _jsonb(r["record"])) for r in records]
-        with self.conn.transaction(), self.conn.cursor() as cur:
-            before = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,)).fetchone()[0]
-            cur.executemany(
-                """
-                INSERT INTO meta.quarantine_records (batch_id, endpoint, symbol, date, record)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                """,
-                rows,
-            )
-            after = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,)).fetchone()[0]
+        before = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,)).fetchone()[0]
+        cur.executemany(
+            """
+            INSERT INTO meta.quarantine_records (batch_id, endpoint, symbol, date, record)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            rows,
+        )
+        after = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,)).fetchone()[0]
         return after - before
 
     def release(self, quarantine_id: int, reason: str, decided_by: str) -> int:

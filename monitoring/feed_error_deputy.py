@@ -83,6 +83,7 @@ class FeedErrorDeputy:
             f"{timestamp}.json"
         )
 
+        ERRORS_REPORT.mkdir(parents=True, exist_ok=True)
         file_path = ERRORS_REPORT / file_name
 
         with open(file_path, "w", encoding="utf-8") as f:

@@ -18,9 +18,9 @@
 
 ## Source and lineage
 
-- **写入方**（规划中，代码尚未接入）：
-  - `release(quarantine_id, reason, decided_by)` / `discard(...)`：与 `meta.quarantine_records` 的状态更新放在**同一个 Postgres 事务**里，要么都成功，要么都不生效
-  - refetch / manual_fix 的处理函数
+- **写入方**：
+  - `MetaStore.release(quarantine_id, reason, decided_by)` / `MetaStore.discard(...)` ✅：与 `meta.quarantine_records` 的状态更新放在**同一个 Postgres 事务**里，要么都成功，要么都不生效
+  - refetch / manual_fix 的处理函数（待写）
   - 规则自动处理时，`decided_by = 'auto'`，并填 `rule_id` / `rule_version`
 - **上游**：
   - `quarantine_id` → `meta.quarantine_records`（release / discard）

@@ -21,11 +21,12 @@
 
 同一条记录触发两条规则，就是两行。股票层面的问题（不对应具体某一天）`date` 为空。
 
-主键：`issue_id`（自增）。唯一键：`(batch_id, rule_id, symbol, date)`，同一批数据重复校验不会重复记录。
+主键：`issue_id`（自增）。唯一键：`(batch_id, rule_id, rule_version, symbol, date)`：同一批数据用同一版规则重复校验不会重复记录；规则升级后重新校验，新版本的问题会作为新记录写入（[008](../../sql/postgres/008_issues_version_and_load_intermediate.sql) 加上了 `rule_version`）。
 
 ## Source and lineage
 
-- **写入方**（规划中，代码尚未接入）：[`clean/base_clean.py`](../../clean/base_clean.py) 的 `CleanBasic._add_error()`，以及各子类的 `_check_*` 方法。目前 `_add_error` 只把错误行存在内存里的 `self.errors`，之后会改为同时写入本表
+- **产生**：清洗类的 `validate()`（[`clean/base_clean.py`](../../clean/base_clean.py)）按 `rules` 逐条校验，返回 `CleanResult.issues`，每项 `{rule_id, rule_version, severity, symbol, date, detail}`。清洗类本身不碰数据库
+- **写入方**：[`pipelines/clean_runner.py`](../../pipelines/clean_runner.py) 的 `run_clean()` 调用 `MetaStore.record_validation()`，**和隔离数据在同一个事务里写入**，要么都成功，要么都不生效
 - **上游**：
   - `batch_id` → `meta.ingestion`
   - `(rule_id, rule_version)` → `meta.quality_rules`
@@ -62,7 +63,7 @@
 
 | 索引 | 用途 |
 |---|---|
-| `uq_quality_issues_dedup` (`batch_id, rule_id, symbol, date`) NULLS NOT DISTINCT | 去重；`date` 为空也视为相同 |
+| `uq_quality_issues_dedup` (`batch_id, rule_id, rule_version, symbol, date`) NULLS NOT DISTINCT | 去重；`date` 为空也视为相同 |
 | `idx_quality_issues_symbol_date` (`symbol, date`) | 按股票、日期查 |
 | `idx_quality_issues_rule` (`rule_id, detected_at DESC`) | 按规则看最近的触发情况 |
 

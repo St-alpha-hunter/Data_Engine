@@ -21,11 +21,12 @@
 
 ## Source and lineage
 
-- **写入方**（规划中，代码尚未接入）：清洗校验阶段，发现 `danger` 问题的数据行写入本表（`status = 'pending'`），同时不写入 golden
-- **状态变更**（规划中）：Python 函数 `release()` / `discard()`，在**同一个 Postgres 事务**里：
+- **产生**：清洗类的 `validate()` 把触发 danger 规则的行放进 `CleanResult.quarantine_df`，这些行不会进入 `clean_df`（也就不会进 golden）
+- **写入方**：[`pipelines/clean_runner.py`](../../pipelines/clean_runner.py) 的 `run_clean()` 调用 `MetaStore.record_validation()`，**和问题记录在同一个事务里写入**，`status = 'pending'`。分开写的话，中途失败会出现"问题记下了、数据却没进隔离区"，这些 danger 行既不在隔离区也不在 golden，凭空消失
+- **状态变更**：`MetaStore.release()` / `MetaStore.discard()` ✅，在**同一个 Postgres 事务**里：
   1. 插入一条 `meta.data_corrections`
   2. 更新本表的 `status` 和 `resolved_at`
-- **写入 golden**（outbox 模式，规划中）：定时任务扫描 `status = 'released' AND golden_written_at IS NULL` 的行，写入 ClickHouse golden（`quality_status = 'warning'`），成功后回填 `golden_written_at`；失败不回填，下次重试。golden 是"追加新版本、按版本取最新"的设计，重复写入不会产生重复数据
+- **写入 golden**（outbox 模式；`MetaStore.pending_outbox()` / `mark_written()` 已就绪，定时任务待写）：定时任务扫描 `status = 'released' AND golden_written_at IS NULL` 的行，写入 ClickHouse golden（`quality_status = 'warning'`），成功后回填 `golden_written_at`；失败不回填，下次重试。golden 是"追加新版本、按版本取最新"的设计，重复写入不会产生重复数据
 - **上游**：`batch_id` → `meta.ingestion`
 - **下游**：
   - `meta.data_corrections.quarantine_id` 引用本表

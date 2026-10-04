@@ -21,10 +21,11 @@
 
 ## Source and lineage
 
-- **写入方**（规划中，代码尚未接入）：`fetch_data/fetch.py` 的 `FetchData`
-  1. 拉取开始时插入一行：`batch_id`、`endpoint`、`params`、`n_symbols`，`status` 自动为 `running`
-  2. 拉取结束时用 `fetch_fmp_batch()` 返回的 `summary`、`succeed_list`、`failed_list` 回填计数、列表和 `status`、`finished_at`
-  3. `FeedErrorDeputy.generate_report()` 生成错误报告后，回填 `report`
+- **写入方**：[`db/meta_store.py`](../../db/meta_store.py) 的 `MetaStore.ingestion_run()`（with 写法），由 [`pipelines/raw_loader.py`](../../pipelines/raw_loader.py) 的 `ingest()` 调用，包住 A 拉取 + B 写 raw：
+  1. 进入 with：插入一行 `batch_id`、`endpoint`、`params`、`n_symbols`、`git_version`，`status` 自动为 `running`
+  2. 拉取结束：`run.finish()` 用 `FetchData.fetch_fmp_batch()` 返回的 `summary`、`failed_list` 准备好计数、列表和状态
+  3. 退出 with：写入结果和 `finished_at`；中途报错（包括结构检查不通过）记为 `failed`，异常信息追加到 `failure_detail`
+  4. `report`：C 步骤 `run_clean()` 发现问题时，用 `FeedErrorDeputy.generate_report()` 生成 JSON 错误报告，通过 `MetaStore.set_report()` 回填
 - **上游**：FMP API（[`config/endpoints.py`](../../config/endpoints.py) 的 `FMP_ENDPOINTS`）
 - **下游**（通过 `batch_id` 引用本表）：
   - `meta.quality_issues.batch_id`

@@ -4,56 +4,16 @@ import numpy as np
 import psycopg
 
 from config.paths import BASE_DIR
-from db.config import PGConfig
-from db.connections import connect_pg
 from db.meta_store import MetaStore, track_ingestion, new_batch_id
 
 """
 
 MetaStore 集成测试：连接 Docker 里的 PostgreSQL，在独立的测试库 data_engine_test 上运行，
-不会影响正式库 data_engine。测试库每次运行都按 sql/postgres/ 下的迁移文件从零重建。
-PostgreSQL 没启动时自动跳过。
+不会影响正式库 data_engine。夹具见 conftest.py。
 
 """
 
-TEST_DB = "data_engine_test"
-MIGRATIONS = sorted((BASE_DIR / "sql" / "postgres").glob("*.sql"))
-META_TABLES = "meta.load_log, meta.data_corrections, meta.quarantine_records, meta.quality_issues, meta.ingestion"
-
-
-# =========================
-# fixtures
-# =========================
-@pytest.fixture(scope="session")
-def test_db_config():
-    try:
-        admin = connect_pg()
-    except (psycopg.OperationalError, KeyError) as e:
-        pytest.skip(f"PostgreSQL 不可用：{e}")
-
-    with admin:
-        admin.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
-        admin.execute(f"CREATE DATABASE {TEST_DB}")
-
-    cfg = PGConfig.from_env(dbname=TEST_DB)
-    with connect_pg(cfg) as conn:
-        for path in MIGRATIONS:
-            conn.execute(path.read_text(encoding="utf-8"))
-    return cfg
-
-
-@pytest.fixture
-def conn(test_db_config):
-    """每个测试一个干净的库：清空业务数据，保留规则表的初始数据"""
-    with connect_pg(test_db_config) as c:
-        # TRUNCATE 不触发行级触发器，所以能清空只追加的 data_corrections
-        c.execute(f"TRUNCATE {META_TABLES} RESTART IDENTITY CASCADE")
-        yield c
-
-
-@pytest.fixture
-def store(conn):
-    return MetaStore(conn)
+# 数据库夹具（test_db_config / conn / store）在 conftest.py
 
 
 def make_batch(store, symbols=("AAPL", "MSFT")):
@@ -324,3 +284,52 @@ def test_release_blank_reason_rolls_back_status(store):
     status = store.conn.execute(
         "SELECT status FROM meta.quarantine_records WHERE quarantine_id = %s", (aapl_id,)).fetchone()[0]
     assert status == "pending"
+
+
+# =========================
+# ✅ sync_rules：规则以代码为准
+# =========================
+from clean.clean_price_volume_fmp_dev import PriceVolume
+
+
+def test_sync_rules_from_code(store):
+    result = store.sync_rules(PriceVolume.rule_definitions())
+    assert result["unchanged"] == ["PV001", "PV002", "PV004"]   # 002 里已经有 v1
+    assert result["upgraded"] == ["PV003"]                       # 代码里是 v2（跳过价格 <= 0 的行）
+    assert result["inserted"] == ["PV005"]                       # 代码里新加的
+    active = store.active_rules("price_volume")
+    assert set(active) == {"PV001", "PV002", "PV003", "PV004", "PV005"}
+    assert active["PV003"]["rule_version"] == 2
+
+    # 再同步一次：什么都不变
+    again = store.sync_rules(PriceVolume.rule_definitions())
+    assert again["inserted"] == [] and again["upgraded"] == []
+
+
+def test_sync_rules_changed_params_without_bump_rejected(store):
+    store.sync_rules(PriceVolume.rule_definitions())
+    defs = PriceVolume.rule_definitions()
+    defs[2]["params"] = {"max_range": 0.20}           # 改了 PV003 阈值，没升版本
+    defs.append({**defs[0], "rule_id": "PV999"})      # 同一次同步里还有一条新规则
+    with pytest.raises(ValueError, match="PV003 v2 的 severity/params 与数据库登记的不一致"):
+        store.sync_rules(defs)
+    # 整体回滚：PV999 也没有插进去
+    assert "PV999" not in store.active_rules("price_volume")
+
+
+def test_sync_rules_version_bump(store):
+    store.sync_rules(PriceVolume.rule_definitions())
+    defs = PriceVolume.rule_definitions()
+    defs[2].update(rule_version=3, params={"max_range": 0.20})
+    result = store.sync_rules(defs)
+    assert result["upgraded"] == ["PV003"]
+
+    active = store.active_rules("price_volume")["PV003"]
+    assert (active["rule_version"], active["params"]) == (3, {"max_range": 0.20})
+    versions = store.conn.execute(
+        "SELECT rule_version, is_active FROM meta.quality_rules WHERE rule_id = 'PV003' ORDER BY 1").fetchall()
+    assert versions == [(1, False), (2, False), (3, True)]     # 旧版本保留，只是不生效
+
+    # 旧代码（v2）再来同步：拒绝
+    with pytest.raises(ValueError, match="低于数据库最高版本"):
+        store.sync_rules(PriceVolume.rule_definitions())

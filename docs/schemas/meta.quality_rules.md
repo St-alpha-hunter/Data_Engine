@@ -63,6 +63,12 @@
 | PV004 | v1 | warning | 收益率跳变：相邻两日收益率之差的绝对值 > max_jump | `{"max_jump": 0.15}` | `PriceVolume._check_jump_soar` |
 | PV005 | v1 | danger | 价格或成交量缺失（NaN 参与比较永远为 False，其他规则抓不到） | — | `PriceVolume._check_missing_values` |
 
+| CAL001 | v1 | warning | FMP 标为休市，但 exchange_calendars 为交易日 | — | `pipelines.trading_calendar.cross_check` |
+| CAL002 | v1 | warning | exchange_calendars 为休市（非周末），但 FMP 没有标为休市 | — | 同上 |
+| CAL003 | v1 | warning | 提前收盘不一致（只核对 early_close_from 之后） | `{"early_close_from": "2012-01-01"}` | 同上 |
+
+CAL 系列规则不在清洗类里，定义在 [`pipelines/trading_calendar.py`](../../pipelines/trading_calendar.py) 的 `CALENDAR_RULES`，同样以代码为准、运行时同步；记入 `quality_issues` 时 `symbol` 填交易所代码（XNYS / XNAS）。
+
 版本变更记录：
 
 | 规则 | 版本 | 变更 |

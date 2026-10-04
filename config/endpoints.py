@@ -80,5 +80,12 @@ FMP_ENDPOINTS = {
         "url":"https://financialmodelingprep.com/stable/grades-historical?symbol={symbol}&apikey={apikey}",
         "required_params":[],
         "source_logic_version": 1
+    },
+    # 交易所节假日：这里的 symbol 传交易所名（NYSE / NASDAQ）
+    # 注意 FMP 这个接口的 from 不含当天（from=2015-01-01 会漏掉元旦），调用时 from 要往前放一天
+    "holidays_by_exchange":{
+        "url":"https://financialmodelingprep.com/stable/holidays-by-exchange?exchange={symbol}&from={from_date}&to={to_date}&apikey={apikey}",
+        "required_params":["from_date","to_date"],
+        "source_logic_version": 1
     }
 }

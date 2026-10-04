@@ -12,6 +12,7 @@
 | 存储 | 连接 | 库 / schema | 放什么 | 写入方式 |
 |---|---|---|---|---|
 | PostgreSQL 16（Docker） | `localhost:5433`，库 `data_engine` | `meta` | 数据治理工具表：批次、规则、问题、隔离、处理记录 | 行数少，允许按状态更新（`data_corrections` 除外） |
+| PostgreSQL 16（Docker） | 同上 | `ref` | 状态表：交易日历（以后还有证券主表、成分股区间） | 有变化才更新；ClickHouse 用 `postgresql()` 直接跨库读 |
 | ClickHouse 24.8（Docker） | `localhost:8123` | `raw` | FMP 原始数据，原样落库 | 只追加 |
 | ClickHouse 24.8（Docker） | `localhost:8123` | `golden` | 清洗校验后的数据，可追溯版本 | 只追加，用视图取当前版本 |
 | 中间态存储 | 本地 `data/` 下每个接口自己的目录（`config/paths.py` 的 `ENDPOINT_DATA_DIRS`，如 price_volume → `data/volume_data_1y/`） | — | 清洗后的中间态 parquet，D 步骤读它写 golden | 每个批次一个文件 `{batch_id}.parquet`，重跑覆盖。以后换对象存储只需在 `.env` 设 `INTERMEDIATE_URL=s3://...` |
@@ -62,7 +63,13 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | `meta.data_corrections` | 对问题 / 隔离数据的处理记录 | 一次处理动作（只追加） | [004](../sql/postgres/004_meta_data_corrections.sql) | [data_corrections](schemas/meta.data_corrections.md) |
 | `meta.load_log` | 每个批次写入了哪些表、多少行 | 一次写表 | [006](../sql/postgres/006_meta_load_log.sql) | [load_log](schemas/meta.load_log.md) |
 
-`meta` schema 本身见 [000](../sql/postgres/000_schema_meta.sql)；约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)；ticker → symbol 改名见 [007](../sql/postgres/007_rename_ticker_to_symbol.sql)。issues 去重键与 load_log 中间态见 [008](../sql/postgres/008_issues_version_and_load_intermediate.sql)。新环境按 000 → 008 顺序执行即可从零重建。
+`meta` schema 本身见 [000](../sql/postgres/000_schema_meta.sql)；约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)；ticker → symbol 改名见 [007](../sql/postgres/007_rename_ticker_to_symbol.sql)。issues 去重键与 load_log 中间态见 [008](../sql/postgres/008_issues_version_and_load_intermediate.sql)。交易日历见 [009](../sql/postgres/009_ref_trading_calendar.sql)。新环境按 000 → 009 顺序执行即可从零重建。
+
+### PostgreSQL · `data_engine.ref`
+
+| 表 | 用途 | 粒度（一行代表） | 建表 SQL | 表级文档 |
+|---|---|---|---|---|
+| `ref.trading_calendar` | 交易所日历：是否交易、提前收盘、开收盘时间、前后交易日 | 一个交易所的一个自然日 | [009](../sql/postgres/009_ref_trading_calendar.sql) | [trading_calendar](schemas/ref.trading_calendar.md) |
 
 ### ClickHouse · `raw` / `golden`
 
@@ -100,6 +107,7 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, symbol, dat
 |---|---|---|---|
 | `batch_id` | text | 一次 FMP 拉取的批次号 | 格式 `{endpoint}_{YYYYmmdd_HHMMSS}_{4位随机码}`，如 `price_volume_20261003_123000_a1b2`；主表是 `meta.ingestion` |
 | `endpoint` | text | FMP 接口名 | 取值必须是 `config/endpoints.py` 里 `FMP_ENDPOINTS` 的 key，如 `price_volume`、`market_cap`；清洗类的 `endpoint_name` 也必须用这个 key |
+| `exchange` | text | 交易所 | MIC 代码：`XNYS`（纽交所）、`XNAS`（纳斯达克）。FMP 用的是 `NYSE` / `NASDAQ`，入库时统一转成 MIC |
 | `source` | text | 数据源 | 目前只有 `fmp`（raw 表） |
 | `extra` | text（JSON） | FMP 多返回的、表里没定义的字段 | raw 表专用；没有多余字段时为 `'{}'` |
 | `issue_id` | bigint | 一条质量问题的编号 | 主表是 `meta.quality_issues`，自增 |

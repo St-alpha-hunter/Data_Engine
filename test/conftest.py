@@ -19,7 +19,7 @@ from db.meta_store import MetaStore
 
 PG_TEST_DB = "data_engine_test"
 PG_MIGRATIONS = sorted((BASE_DIR / "sql" / "postgres").glob("*.sql"))
-META_TABLES = ("ref.trading_calendar, meta.load_log, meta.data_corrections, meta.quarantine_records, "
+META_TABLES = ("events.sp500_index_changes, events.acquisitions, events.symbol_changes, events.splits, events.dividends, events.corporate_events, ref.security_identifiers, ref.securities, ref.trading_calendar, meta.load_log, meta.data_corrections, meta.quarantine_records, "
                "meta.quality_issues, meta.ingestion, meta.quality_rules")
 
 CH_TEST_DB = "raw_test"

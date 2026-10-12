@@ -96,6 +96,16 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | 表 | 用途 | 粒度（一行代表） | 建表 SQL | 表级文档 |
 |---|---|---|---|---|
 | `raw.price_volume_daily` | FMP 日线原始数据，只追加、不去重 | 一个批次里一只股票一天（batch × symbol × date） | [ch 001](../sql/clickhouse/001_raw_price_volume_daily.sql) | [raw.price_volume_daily](schemas/raw.price_volume_daily.md) |
+| `raw.income_statement` | 利润表；年报 + 季报（`period` = FY / Q1–Q4），2010 年起；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一个报告期（batch × symbol × date × period） | [ch 002](../sql/clickhouse/002_raw_income_statement.sql) | — |
+| `raw.balance_sheet` | 资产负债表；年报 + 季报；FMP 原样 + 追溯字段，只追加 | 同上 | [ch 003](../sql/clickhouse/003_raw_balance_sheet.sql) | — |
+| `raw.cash_flow` | 现金流量表；年报 + 季报；FMP 原样 + 追溯字段，只追加 | 同上 | [ch 004](../sql/clickhouse/004_raw_cash_flow.sql) | — |
+| `raw.financial_ratio` | 财务比率；只有年报（季报需要高级套餐）；FMP 原样 + 追溯字段，只追加 | 同上 | [ch 005](../sql/clickhouse/005_raw_financial_ratio.sql) | — |
+| `raw.enterprise_values` | 企业价值（年度）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一个财年末（batch × symbol × date） | [ch 006](../sql/clickhouse/006_raw_enterprise_values.sql) | — |
+| `raw.market_cap` | 历史市值（每天）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一天（batch × symbol × date） | [ch 007](../sql/clickhouse/007_raw_market_cap.sql) | — |
+| `raw.financial_estimate` | 分析师一致预期（年度，最近 10 个财年）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一个被预测财年 | [ch 008](../sql/clickhouse/008_raw_financial_estimate.sql) | — |
+| `raw.analyst_grades` | 分析师评级人数（每月）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一个月 | [ch 009](../sql/clickhouse/009_raw_analyst_grades.sql) | — |
+| `raw.profile` | 公司概况快照（没有日期，看 `ingested_at`）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票 | [ch 010](../sql/clickhouse/010_raw_profile.sql) | — |
+| `raw.executive_compensation` | 高管薪酬；FMP 原样 + 追溯字段，只追加 | 一个批次里一份委托书的一位高管（batch × symbol × filingDate × nameAndPosition） | [ch 011](../sql/clickhouse/011_raw_executive_compensation.sql) | — |
 | `golden.price_volume_daily` | 日线清洗后数据，带版本字段 | — | 待建 | — |
 | `golden.v_price_volume_daily` | 取当前版本的视图，默认读这个 | — | 待建 | — |
 

@@ -1,213 +1,103 @@
-import numpy as np
-import pandas as pd
-from datetime import datetime
+from clean.base_clean import CleanBasic, Rule, not_close
 
-from config.paths import TEM_SYMBOL
-from fetch_data.fetch import FetchData
-from monitoring.feed_error_deputy import FeedErrorDeputy
-from clean.base_clean import CleanBasic
+"""
+
+财务比率（FMP ratios）
+
+比率都是 FMP 用报表算出来的，所以这里主要查"同一行里的比率互相矛盾"：
+    同一个量的两种算法对不上（净利率 vs 每股净利润 / 每股收入、财务杠杆 vs 负债权益比 / 负债资产比）
+    有包含关系的比率顺序颠倒（现金比率 <= 速动比率 <= 流动比率；EBITDA 利润率 >= EBIT 利润率）
+合规性：不能为负的比率为负（周转率、流动性比率，分子分母都不为负）
+
+不查上下限：银行的毛利率可以 > 100%（实测 JPM 2021 年 1.03），亏损公司的有效税率、分红率可以为负
+
+"""
+
+NON_NEGATIVE = ["receivablesTurnover", "payablesTurnover", "inventoryTurnover", "fixedAssetTurnover",
+                "assetTurnover", "currentRatio", "quickRatio", "cashRatio"]
+
 
 class FinancialRatio(CleanBasic):
 
     endpoint_name = "financial_ratio"
 
     config = {
-        "required_columns":[
-            'symbol', 
-            'date', 
-            'fiscalYear', 
-            'period', 
-            'reportedCurrency', 
-            'grossProfitMargin', 
-            'ebitMargin',
-            'ebitdaMargin',
-            'operatingProfitMargin',
-            'pretaxProfitMargin',
-            'continuousOperationsProfitMargin',
-            'netProfitMargin',
-            'bottomLineProfitMargin',
-            'receivablesTurnover',
-            'payablesTurnover',
-            'inventoryTurnover',
-            'fixedAssetTurnover',
-            'assetTurnover',
-            'currentRatio',
-            'quickRatio',
-            'solvencyRatio',
-            'cashRatio',
-            'priceToEarningsRatio',
-            'priceToEarningsGrowthRatio',
-            'forwardPriceToEarningsGrowthRatio',
-            'priceToBookRatio',
-            'priceToSalesRatio',
-            'priceToFreeCashFlowRatio',
-            'priceToOperatingCashFlowRatio',
-            'debtToAssetsRatio',
-            'debtToEquityRatio',
-            'debtToCapitalRatio',
-            'longTermDebtToCapitalRatio',
-            'financialLeverageRatio',
-            'workingCapitalTurnoverRatio',
-            'operatingCashFlowRatio',
-            'operatingCashFlowSalesRatio',
-            'freeCashFlowOperatingCashFlowRatio',
-            'debtServiceCoverageRatio',
-            'interestCoverageRatio',
-            'shortTermOperatingCashFlowCoverageRatio',
-            'operatingCashFlowCoverageRatio',
-            'capitalExpenditureCoverageRatio',
-            'dividendPaidAndCapexCoverageRatio',
-            'dividendPayoutRatio',
-            'dividendYield',
-            'dividendYieldPercentage',
-            'revenuePerShare',
-            'netIncomePerShare',
-            'interestDebtPerShare',
-            'cashPerShare',
-            'bookValuePerShare',
-            'tangibleBookValuePerShare',
-            'shareholdersEquityPerShare',
-            'operatingCashFlowPerShare',
-            'capexPerShare',
-            'freeCashFlowPerShare',
-            'netIncomePerEBT',
-            'ebtPerEbit',
-            'priceToFairValue',
-            'debtToMarketCap',
-            'effectiveTaxRate',
-            'enterpriseValueMultiple'
-            ],
-
-        "numeric_columns":[
-            'grossProfitMargin', 
-            'ebitMargin', 'ebitdaMargin', 
-            'operatingProfitMargin', 'pretaxProfitMargin', 
-            'continuousOperationsProfitMargin', 'netProfitMargin', 
-            'bottomLineProfitMargin', 'receivablesTurnover', 'payablesTurnover', 
-            'inventoryTurnover', 'fixedAssetTurnover', 'assetTurnover', 'currentRatio', 
-            'quickRatio', 'solvencyRatio', 'cashRatio', 'priceToEarningsRatio',
-              'priceToEarningsGrowthRatio', 'forwardPriceToEarningsGrowthRatio', 
-              'priceToBookRatio', 'priceToSalesRatio', 'priceToFreeCashFlowRatio', 
-              'priceToOperatingCashFlowRatio', 'debtToAssetsRatio', 'debtToEquityRatio', 
-              'debtToCapitalRatio', 'longTermDebtToCapitalRatio', 'financialLeverageRatio', 
-              'workingCapitalTurnoverRatio', 'operatingCashFlowRatio', 'operatingCashFlowSalesRatio',
-                'freeCashFlowOperatingCashFlowRatio', 'debtServiceCoverageRatio',
-                  'interestCoverageRatio', 'shortTermOperatingCashFlowCoverageRatio', 
-                  'operatingCashFlowCoverageRatio', 'capitalExpenditureCoverageRatio', 
-                  'dividendPaidAndCapexCoverageRatio', 'dividendPayoutRatio', 'dividendYield',
-                    'dividendYieldPercentage', 'revenuePerShare', 'netIncomePerShare', 
-                    'interestDebtPerShare', 'cashPerShare', 'bookValuePerShare', 
-                    'tangibleBookValuePerShare', 'shareholdersEquityPerShare', 
-                    'operatingCashFlowPerShare', 'capexPerShare', 
-                    'freeCashFlowPerShare', 'netIncomePerEBT', 
-                    'ebtPerEbit', 'priceToFairValue', 
-                    'debtToMarketCap', 'effectiveTaxRate', 'enterpriseValueMultiple'
+        "required_columns": [
+            "symbol", "date", "period",
+            "ebitMargin", "ebitdaMargin", "netProfitMargin",
+            "currentRatio", "quickRatio", "cashRatio",
+            "debtToAssetsRatio", "debtToEquityRatio", "financialLeverageRatio",
+            "dividendYield", "dividendYieldPercentage",
+            "revenuePerShare", "netIncomePerShare",
+            "operatingCashFlowPerShare", "capexPerShare", "freeCashFlowPerShare",
+        ] + NON_NEGATIVE[:5],
+        "numeric_columns": [
+            "grossProfitMargin", "ebitMargin", "ebitdaMargin", "operatingProfitMargin", "pretaxProfitMargin",
+            "continuousOperationsProfitMargin", "netProfitMargin", "bottomLineProfitMargin",
+            "receivablesTurnover", "payablesTurnover", "inventoryTurnover", "fixedAssetTurnover", "assetTurnover",
+            "currentRatio", "quickRatio", "solvencyRatio", "cashRatio",
+            "priceToEarningsRatio", "priceToEarningsGrowthRatio", "forwardPriceToEarningsGrowthRatio",
+            "priceToBookRatio", "priceToSalesRatio", "priceToFreeCashFlowRatio", "priceToOperatingCashFlowRatio",
+            "debtToAssetsRatio", "debtToEquityRatio", "debtToCapitalRatio", "longTermDebtToCapitalRatio",
+            "financialLeverageRatio", "workingCapitalTurnoverRatio", "operatingCashFlowRatio",
+            "operatingCashFlowSalesRatio", "freeCashFlowOperatingCashFlowRatio", "debtServiceCoverageRatio",
+            "interestCoverageRatio", "shortTermOperatingCashFlowCoverageRatio", "operatingCashFlowCoverageRatio",
+            "capitalExpenditureCoverageRatio", "dividendPaidAndCapexCoverageRatio", "dividendPayoutRatio",
+            "dividendYield", "dividendYieldPercentage", "revenuePerShare", "netIncomePerShare",
+            "interestDebtPerShare", "cashPerShare", "bookValuePerShare", "tangibleBookValuePerShare",
+            "shareholdersEquityPerShare", "operatingCashFlowPerShare", "capexPerShare", "freeCashFlowPerShare",
+            "netIncomePerEBT", "ebtPerEbit", "priceToFairValue", "debtToMarketCap", "effectiveTaxRate",
+            "enterpriseValueMultiple",
         ],
-        "date_columns":[
-            "date","fiscalYear"
-        ],
-        "drop_columns":[
-            "symbol","date"
-        ],
-        "duplicate_columns":[
-            "symbol","date"
-        ]
-
+        "date_columns": ["date"],
+        "drop_columns": [],
+        "duplicate_columns": ["symbol", "date", "period"],
+        "output_columns": [],
     }
 
-    def _custom_validate(self):
-        pass
+    rules = [
+        # ---- 合规性 ----
+        Rule("FR001", 1, "warning", "不能为负的比率为负：各项周转率、流动比率、速动比率、现金比率",
+             check="_check_negative", params={"columns": NON_NEGATIVE}, detail_columns=tuple(NON_NEGATIVE)),
+        # ---- 比率之间不矛盾 ----
+        Rule("FR002", 1, "warning", "流动性比率顺序颠倒：应满足 现金比率 <= 速动比率 <= 流动比率（容差 0.01）",
+             check="_check_liquidity_order", detail_columns=("cashRatio", "quickRatio", "currentRatio")),
+        Rule("FR003", 1, "warning", "EBITDA 利润率 < EBIT 利润率（折旧摊销不能为负；容差 0.001）",
+             check="_check_ebitda_margin", detail_columns=("ebitdaMargin", "ebitMargin")),
+        Rule("FR004", 1, "warning", "净利率 ≠ 每股净利润 / 每股收入（误差 > 2%）",
+             check="_check_ratio", params={"value": "netProfitMargin", "num": "netIncomePerShare", "den": "revenuePerShare"},
+             detail_columns=("netProfitMargin", "netIncomePerShare", "revenuePerShare")),
+        Rule("FR005", 1, "warning", "财务杠杆（资产 / 权益）≠ 负债权益比 / 负债资产比（误差 > 2%）",
+             check="_check_ratio", params={"value": "financialLeverageRatio", "num": "debtToEquityRatio", "den": "debtToAssetsRatio"},
+             detail_columns=("financialLeverageRatio", "debtToEquityRatio", "debtToAssetsRatio")),
+        Rule("FR006", 1, "warning", "每股自由现金流 ≠ 每股经营现金流 - 每股资本开支（误差 > 2%）",
+             check="_check_identity",
+             params={"total": "freeCashFlowPerShare", "parts": ["operatingCashFlowPerShare", "-capexPerShare"], "rel": 0.02, "atol": 0.01},
+             detail_columns=("freeCashFlowPerShare", "operatingCashFlowPerShare", "capexPerShare")),
+        Rule("FR007", 1, "warning", "股息率百分比 ≠ 100 × 股息率（误差 > 1%）",
+             check="_check_dividend_yield", detail_columns=("dividendYield", "dividendYieldPercentage")),
+    ]
 
+    def _check_liquidity_order(self, df):
+        return (df["cashRatio"] > df["quickRatio"] + 0.01) | (df["quickRatio"] > df["currentRatio"] + 0.01)
 
-    def _margin_check(self):
-        pass
+    def _check_ebitda_margin(self, df):
+        return df["ebitdaMargin"] < df["ebitMargin"] - 0.001
 
-    def _check_positive_value(self):
-        check_positive_item = ['receivablesTurnover',
-                'payablesTurnover',
-                'inventoryTurnover',
-                'fixedAssetTurnover',
-                'assetTurnover']
-        mask = ~(self.raw_df[check_positive_item]<0).any(axis = 1)
-        self._add_error(mask, "abnormal")
-        
-    def _check_logic_relation(self):
-        pass
+    def _check_ratio(self, df, value, num, den):
+        # 分母为 0 时不检查（比率本身没有意义）
+        return (df[den] != 0) & not_close(df[value], df[num] / df[den], rel=0.02, atol=0.001)
 
-    def _compute_navigate_rate(self):
-        pass
-
-    def build_stats(self):
-        pass
+    def _check_dividend_yield(self, df):
+        return not_close(df["dividendYieldPercentage"], 100 * df["dividendYield"], rel=0.01, atol=1e-4)
 
 
 """
-[
-	{
-		"symbol": "AAPL",
-		"date": "2024-09-28",
-		"fiscalYear": "2024",
-		"period": "FY",
-		"reportedCurrency": "USD",
-		"grossProfitMargin": 0.4620634981523393,
-		"ebitMargin": 0.31510222870075566,
-		"ebitdaMargin": 0.3443707085043538,
-		"operatingProfitMargin": 0.31510222870075566,
-		"pretaxProfitMargin": 0.3157901466620635,
-		"continuousOperationsProfitMargin": 0.23971255769943867,
-		"netProfitMargin": 0.23971255769943867,
-		"bottomLineProfitMargin": 0.23971255769943867,
-		"receivablesTurnover": 5.903038811648023,
-		"payablesTurnover": 3.0503480278422272,
-		"inventoryTurnover": 28.870710952511665,
-		"fixedAssetTurnover": 8.560310858143607,
-		"assetTurnover": 1.0713874732862074,
-		"currentRatio": 0.8673125765340832,
-		"quickRatio": 0.8260068483831466,
-		"solvencyRatio": 0.3414634938155374,
-		"cashRatio": 0.16975259648963673,
-		"priceToEarningsRatio": 37.287278415656736,
-		"priceToEarningsGrowthRatio": -45.93792700808932,
-		"forwardPriceToEarningsGrowthRatio": -45.93792700808932,
-		"priceToBookRatio": 61.37243774486391,
-		"priceToSalesRatio": 8.93822887866815,
-		"priceToFreeCashFlowRatio": 32.12256867269569,
-		"priceToOperatingCashFlowRatio": 29.55638142954995,
-		"debtToAssetsRatio": 0.29215025480848267,
-		"debtToEquityRatio": 1.872326602282704,
-		"debtToCapitalRatio": 0.6518501763673821,
-		"longTermDebtToCapitalRatio": 0.6009110021023125,
-		"financialLeverageRatio": 6.408779631255487,
-		"workingCapitalTurnoverRatio": -31.099932397502684,
-		"operatingCashFlowRatio": 0.6704045534944896,
-		"operatingCashFlowSalesRatio": 0.3024128274962599,
-		"freeCashFlowOperatingCashFlowRatio": 0.9201126388959359,
-		"debtServiceCoverageRatio": 5.024761722304708,
-		"interestCoverageRatio": 0,
-		"shortTermOperatingCashFlowCoverageRatio": 5.663777000814215,
-		"operatingCashFlowCoverageRatio": 1.109022873702276,
-		"capitalExpenditureCoverageRatio": 12.517624642743728,
-		"dividendPaidAndCapexCoverageRatio": 4.7912969490701345,
-		"dividendPayoutRatio": 0.16252026969360758,
-		"dividendYield": 0.0043585983369965175,
-		"dividendYieldPercentage": 0.43585983369965176,
-		"revenuePerShare": 25.484914639368924,
-		"netIncomePerShare": 6.109054070954992,
-		"interestDebtPerShare": 6.949329249507765,
-		"cashPerShare": 4.247388013764271,
-		"bookValuePerShare": 3.711600978715614,
-		"tangibleBookValuePerShare": 3.711600978715614,
-		"shareholdersEquityPerShare": 3.711600978715614,
-		"operatingCashFlowPerShare": 7.706965094592383,
-		"capexPerShare": 0.6156891035281195,
-		"freeCashFlowPerShare": 7.091275991064264,
-		"netIncomePerEBT": 0.7590881483581001,
-		"ebtPerEbit": 1.0021831580314244,
-		"priceToFairValue": 61.37243774486391,
-		"debtToMarketCap": 0.03050761336980449,
-		"effectiveTaxRate": 0.24091185164189982,
-		"enterpriseValueMultiple": 26.524727497716487
-	}
-]
-
+FMP 返回样例（AAPL FY2024，节选）：
+    ebitMargin 0.3151, ebitdaMargin 0.3444, netProfitMargin 0.2397,
+    currentRatio 0.8673, quickRatio 0.8260, cashRatio 0.1698,
+    debtToAssetsRatio 0.2922, debtToEquityRatio 1.8723, financialLeverageRatio 6.4088,
+    dividendYield 0.004359, dividendYieldPercentage 0.4359,
+    revenuePerShare 25.4849, netIncomePerShare 6.1091,
+    operatingCashFlowPerShare 7.7070, capexPerShare 0.6157, freeCashFlowPerShare 7.0913
 """

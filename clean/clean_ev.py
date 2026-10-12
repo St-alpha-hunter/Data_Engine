@@ -1,52 +1,57 @@
-import logging
-from datetime import datetime
-
-import pandas as pd
-
-from config.endpoints import API_KEY
-from config.paths import ENTERPRISE_PATH
-from fetch_data.fetch import FetchData
-
-log = logging.getLogger(__name__)
+from clean.base_clean import CleanBasic, Rule, not_close
 
 """
 
-企业价值（FMP enterprise-values）：空架子，清洗逻辑待实现。文件末尾是 FMP 返回的样例数据，作为字段参考。
+企业价值（FMP enterprise-values）
+
+    合规性：股价、股数缺失或 <= 0；现金、债务为负
+    同一行不冲突：市值 = 股价 × 股数；企业价值 = 市值 - 现金 + 债务
+    （minusCashAndCashEquivalents 存的是现金本身的正数，计算时减去）
 
 """
 
-
-def clean(df:pd.DataFrame):
-    pass
-
-def compute(df:pd.DataFrame):
-    pass
-
-def save_file(df:pd.DataFrame):
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index(["symbol", "date"]).sort_index()
-    ENTERPRISE_PATH.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(ENTERPRISE_PATH / f"{datetime.now():%Y%m%d_%H%M%S}.parquet")
-    return df
+COLUMNS = ["stockPrice", "numberOfShares", "marketCapitalization", "minusCashAndCashEquivalents",
+           "addTotalDebt", "enterpriseValue"]
 
 
-# 临时入口：拉取并保存，pipelines 完成后改由 pipeline 调用
-if __name__ == "__main__":
-    if not API_KEY:
-        raise ValueError("FMP_API_KEY NOT SET IN")
+class EnterpriseValue(CleanBasic):
 
-    with FetchData(
-        symbols=["AAPL", "MSFT"],
-        endpoint_name="enterprise_values",
-        extra_params=None
-    ) as fetchData:
-        df_raw, summary, succeed, failed = fetchData.fetch_fmp_batch()
+    endpoint_name = "enterprise_values"
 
-    print(summary)
-    print("运行成功")
+    config = {
+        "required_columns": ["symbol", "date"] + COLUMNS,
+        "numeric_columns": COLUMNS,
+        "date_columns": ["date"],
+        "drop_columns": [],
+        "duplicate_columns": ["symbol", "date"],
+        "output_columns": ["symbol", "date"] + COLUMNS,
+    }
+
+    rules = [
+        Rule("EV001", 1, "danger", "股价或股数缺失、<= 0",
+             check="_check_price_shares", detail_columns=("stockPrice", "numberOfShares")),
+        Rule("EV002", 1, "warning", "现金或总债务为负",
+             check="_check_negative", params={"columns": ["minusCashAndCashEquivalents", "addTotalDebt"]},
+             detail_columns=("minusCashAndCashEquivalents", "addTotalDebt")),
+        Rule("EV003", 1, "warning", "市值 ≠ 股价 × 股数（误差 > 1%）",
+             check="_check_market_cap", detail_columns=("marketCapitalization", "stockPrice", "numberOfShares")),
+        Rule("EV004", 1, "danger", "企业价值 ≠ 市值 - 现金 + 总债务（误差 > 0.1%）",
+             check="_check_identity",
+             params={"total": "enterpriseValue", "parts": ["marketCapitalization", "-minusCashAndCashEquivalents", "addTotalDebt"],
+                     "rel": 0.001},
+             detail_columns=tuple(COLUMNS[2:])),
+    ]
+
+    def _check_price_shares(self, df):
+        cols = ["stockPrice", "numberOfShares"]
+        return self._check_missing(df, cols) | self._check_non_positive(df, cols)
+
+    def _check_market_cap(self, df):
+        return not_close(df["marketCapitalization"], df["stockPrice"] * df["numberOfShares"])
+
 
 """
-
-
-
+FMP 返回样例（AAPL 2025-09-27）：
+    stockPrice 255.46, numberOfShares 14948500000, marketCapitalization 3818743810000,
+    minusCashAndCashEquivalents 35934000000, addTotalDebt 112377000000, enterpriseValue 3895186810000
 """

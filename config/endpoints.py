@@ -33,40 +33,53 @@ FMP_ENDPOINTS = {
         "max_rows": 5000,
         "chunk_days": 3650
     },
+    # 历史市值（每天一行）；原来的 market-capitalization 只返回今天一行，字段相同
+    # 和日线一样有单次 5000 行上限，按 10 年一段请求
     "market_cap": {
-        "url": "https://financialmodelingprep.com/stable/market-capitalization?symbol={symbol}&apikey={apikey}",
-        "required_params": [],
-        "source_logic_version": 1
+        "url": "https://financialmodelingprep.com/stable/historical-market-capitalization?symbol={symbol}&from={from_date}&to={to_date}&limit=5000&apikey={apikey}",
+        "required_params": ["from_date", "to_date"],
+        "source_logic_version": 1,
+        "raw_table": "raw.market_cap",
+        "max_rows": 5000,
+        "chunk_days": 3650
     },
     "cash_flow": {
-        "url": "https://financialmodelingprep.com/stable/cash-flow-statement?symbol={symbol}&apikey={apikey}",
-        "required_params": [],
-        "source_logic_version": 1
+        "url": "https://financialmodelingprep.com/stable/cash-flow-statement?symbol={symbol}&period={period}&limit={limit}&apikey={apikey}",
+        "required_params": ["period", "limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.cash_flow"
     },
     "income_statement": {
-        "url": "https://financialmodelingprep.com/stable/income-statement?symbol={symbol}&apikey={apikey}",
-        "required_params": [],
-        "source_logic_version": 1
+        "url": "https://financialmodelingprep.com/stable/income-statement?symbol={symbol}&period={period}&limit={limit}&apikey={apikey}",
+        "required_params": ["period", "limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.income_statement"
     },
     "balance_sheet": {
-        "url": "https://financialmodelingprep.com/stable/balance-sheet-statement?symbol={symbol}&apikey={apikey}",
-        "required_params": [],
-        "source_logic_version": 1
+        "url": "https://financialmodelingprep.com/stable/balance-sheet-statement?symbol={symbol}&period={period}&limit={limit}&apikey={apikey}",
+        "required_params": ["period", "limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.balance_sheet"
     },
+    # 当前套餐只能拉年报（period=quarter 返回 402）
     "financial_ratio":{
-        "url": "https://financialmodelingprep.com/stable/ratios?symbol={symbol}&apikey={apikey}",
-        "required_params":[],
-        "source_logic_version": 1
+        "url": "https://financialmodelingprep.com/stable/ratios?symbol={symbol}&period=annual&limit={limit}&apikey={apikey}",
+        "required_params":["limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.financial_ratio"
     },
+    # 只拉年度：季度也能拉，但返回数据里没有 period 字段，和年度的混在一起分不开
     "enterprise_values":{
-        "url":"https://financialmodelingprep.com/stable/enterprise-values?symbol={symbol}&apikey={apikey}",
-        "required_params":[],
-        "source_logic_version": 1
+        "url":"https://financialmodelingprep.com/stable/enterprise-values?symbol={symbol}&period=annual&limit={limit}&apikey={apikey}",
+        "required_params":["limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.enterprise_values"
     },
     "executive_compensation":{
         "url":"https://financialmodelingprep.com/stable/governance-executive-compensation?symbol={symbol}&apikey={apikey}",
         "required_params":[],
-        "source_logic_version": 1
+        "source_logic_version": 1,
+        "raw_table": "raw.executive_compensation"
     },
     "all_shares_float":{
         "url":"https://financialmodelingprep.com/stable/shares-float-all?page=0&limit=1000&apikey={apikey}",
@@ -76,17 +89,21 @@ FMP_ENDPOINTS = {
     "company_profile":{
         "url":"https://financialmodelingprep.com/stable/profile-cik?cik={cik}&apikey={apikey}",
         "required_params":["cik"],
-        "source_logic_version": 1
+        "source_logic_version": 1,
+        "raw_table": "raw.profile"
     },
+    # 只拉年度预测（返回数据里没有 period 字段，年度和季度混在一起分不开）；limit 最多 10
     "financial_estimate":{
-        "url":"https://financialmodelingprep.com/stable/analyst-estimates?symbol={symbol}&period={period}&page={page}&limit={limit}&apikey={apikey}",
-        "required_params":["period","page","limit"],
-        "source_logic_version": 1
+        "url":"https://financialmodelingprep.com/stable/analyst-estimates?symbol={symbol}&period=annual&page={page}&limit={limit}&apikey={apikey}",
+        "required_params":["page","limit"],
+        "source_logic_version": 1,
+        "raw_table": "raw.financial_estimate"
     },
     "analyst_grades":{
-        "url":"https://financialmodelingprep.com/stable/grades-historical?symbol={symbol}&apikey={apikey}",
+        "url":"https://financialmodelingprep.com/stable/grades-historical?symbol={symbol}&limit=1000&apikey={apikey}",
         "required_params":[],
-        "source_logic_version": 1
+        "source_logic_version": 1,
+        "raw_table": "raw.analyst_grades"
     },
     # ===== 证券主表 =====
     # 公司概况（按股票查）：CIK、ISIN、CUSIP、上市日期、交易所、是否 ADR / ETF / 仍在交易
@@ -94,7 +111,8 @@ FMP_ENDPOINTS = {
     "profile":{
         "url":"https://financialmodelingprep.com/stable/profile?symbol={symbol}&apikey={apikey}",
         "required_params":[],
-        "source_logic_version": 1
+        "source_logic_version": 1,
+        "raw_table": "raw.profile"
     },
     # ===== 公司事件 =====
     # 按股票查全部历史（补历史用）

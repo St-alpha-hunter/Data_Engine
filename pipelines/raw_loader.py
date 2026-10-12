@@ -91,9 +91,15 @@ def check_structure(df: pd.DataFrame, schema: RawSchema) -> pd.DataFrame:
             continue
 
         src = df[col]
-        if base.startswith("Date"):
+        if col not in schema.required:
+            # FMP 常把缺失值返回成空字符串（如 ipoDate ""）：可空列按 NULL 处理，不算转换失败
+            src = src.mask(src.astype(str).str.strip() == "")
+        if base == "Bool":
+            mapping = {True: True, False: False, "true": True, "false": False, "True": True, "False": False}
+            converted = values = src.map(lambda v: mapping.get(v) if pd.notna(v) else None)
+        elif base.startswith("Date"):
             converted = pd.to_datetime(src, errors="coerce", format="ISO8601")
-            values = converted.dt.date if base == "Date" else converted
+            values = converted.dt.date if base in ("Date", "Date32") else converted
         elif base.startswith(("Float", "Int", "UInt", "Decimal")):
             converted = values = pd.to_numeric(src, errors="coerce")
         else:

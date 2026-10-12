@@ -165,4 +165,4 @@ def test_ingest_empty_fetch(store, ch):
 
 def test_ingest_requires_raw_table(store, ch):
     with pytest.raises(ValueError, match="raw_table"):
-        ingest("market_cap", ["AAPL"], store=store, ch=ch, fetcher_cls=fake_fetcher(fmp_df()))
+        ingest("all_shares_float", ["AAPL"], store=store, ch=ch, fetcher_cls=fake_fetcher(fmp_df()))

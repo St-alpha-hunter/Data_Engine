@@ -4,6 +4,15 @@ import numpy as np
 import pandas as pd
 
 
+def not_close(a: pd.Series, b: pd.Series, rel: float = 0.01, atol: float = 1.0) -> pd.Series:
+    """
+    a 和 b 对不上：|a - b| > max(rel × max(|a|, |b|), atol)
+    任一边是空值时返回 False（缺失交给缺失规则判定，不重复报）
+    """
+    scale = np.maximum(a.abs(), b.abs())
+    return (a - b).abs() > np.maximum(rel * scale, atol)
+
+
 @dataclass(frozen=True)
 class Rule:
     """
@@ -168,6 +177,37 @@ class CleanBasic:
         ]
 
     # =========================
+    # 通用检查（规则里直接引用，参数写在 Rule.params；返回 True 表示违反）
+    # =========================
+    def _check_missing(self, df, columns):
+        """任一列为空"""
+        return df[list(columns)].isna().any(axis=1)
+
+    def _check_non_positive(self, df, columns):
+        """任一列 <= 0（应该严格为正的：总资产、股数、价格）"""
+        return (df[list(columns)] <= 0).any(axis=1)
+
+    def _check_negative(self, df, columns):
+        """任一列 < 0（不能为负的：现金、存货、成交量）"""
+        return (df[list(columns)] < 0).any(axis=1)
+
+    def _check_positive(self, df, columns):
+        """任一列 > 0（只能是流出、应 <= 0 的：资本开支、支付的分红、回购）"""
+        return (df[list(columns)] > 0).any(axis=1)
+
+    def _check_identity(self, df, total, parts, rel=0.01, atol=1.0, skip_if_parts_zero=False):
+        """
+        恒等式：total ≈ parts 之和；parts 里的列名前面加 "-" 表示减去
+        skip_if_parts_zero：明细全为 0 时不检查（数据源没拆明细，不算矛盾）
+        """
+        cols = [p.lstrip("-") for p in parts]
+        expected = sum(-df[c] if p.startswith("-") else df[c] for p, c in zip(parts, cols))
+        bad = not_close(df[total], expected, rel, atol)
+        if skip_if_parts_zero:
+            bad &= (df[cols] != 0).any(axis=1)
+        return bad
+
+    # =========================
     # 公共步骤
     # =========================
     def _check_required_columns(self):
@@ -176,11 +216,14 @@ class CleanBasic:
             raise KeyError(f"缺少字段: {list(missing)}")
 
     def _convert_types(self):
+        # 必需的列已由 _check_required_columns 保证；其他声明过的列存在才转换（数据源增减可选字段不影响）
         for col in self.config["date_columns"]:
-            self.raw_df[col] = pd.to_datetime(self.raw_df[col], errors="coerce")
+            if col in self.raw_df.columns:
+                self.raw_df[col] = pd.to_datetime(self.raw_df[col], errors="coerce")
 
         for col in self.config["numeric_columns"]:
-            self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors="coerce")
+            if col in self.raw_df.columns:
+                self.raw_df[col] = pd.to_numeric(self.raw_df[col], errors="coerce")
 
     def _drop_invalid_rows(self):
         if self.config["drop_columns"]:

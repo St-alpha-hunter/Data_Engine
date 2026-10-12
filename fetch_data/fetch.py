@@ -180,8 +180,7 @@ class FetchData:
                     log.info(f"[{self.endpoint_name}] {symbol} {window[0]}~{window[1]} 返回 {len(data)} 行，达到上限，拆开重拉")
                     stack += [(mid + timedelta(days=1), window[1]), (window[0], mid)]      # 先拉前半段
                     continue
-                return "fail", self._failure(symbol, "truncated", 1,
-                                             error=f"返回 {len(data)} 行，达到单次上限 {max_rows}，数据可能被截断")
+                return "fail", self._failure(symbol, "truncated", 1,error=f"返回 {len(data)} 行，达到单次上限 {max_rows}，数据可能被截断")
             rows.extend(data)
         return ("ok", rows) if rows else ("empty", None)
 

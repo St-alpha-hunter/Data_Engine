@@ -3,6 +3,7 @@ import requests
 import logging
 import pandas as pd
 from config.endpoints import API_KEY, FMP_ENDPOINTS
+from config.symbol_map import to_fmp_symbol
 from datetime import datetime, date
 
 log = logging.getLogger(__name__)
@@ -79,6 +80,11 @@ class FetchData:
 
         extra_params = self._normalize_params()
         url_template = self._validate_endpoint(extra_params)
+        # 请求方式（config/endpoints.py 的 iterate）：
+        #   symbol（默认）：self.symbols 是股票代码，每只一个请求，数据打上请求的代码
+        #   none：不按股票请求，self.symbols 只是请求的标签（如 ["ALL"]），数据自带的 symbol 不覆盖
+        #   page：self.symbols 是页码，按页请求，遇到空页就停止
+        iterate = FMP_ENDPOINTS[self.endpoint_name].get("iterate", "symbol")
 
         for symbol in self.symbols:
             failure = None
@@ -89,10 +95,11 @@ class FetchData:
                 time.sleep(self.rate_delay)
 
                 try:
+                    # 按股票请求时 URL 用 FMP 的代码写法（BRK.B → BRK-B），数据仍打上项目内部写法
+                    unit = {"symbol": {"symbol": to_fmp_symbol(symbol)}, "page": {"page": symbol}}.get(iterate, {})
                     url = url_template.format(
-                        symbol=symbol,
                         apikey=API_KEY,
-                        **extra_params
+                        **{**extra_params, **unit}
                     )
                 except KeyError as e:
                     # URL 模板里的占位符没有对应参数，重试也没用
@@ -154,13 +161,17 @@ class FetchData:
                     break
 
                 if not isinstance(data, list) or len(data) == 0:
-                    log.warning(f"[{self.endpoint_name}] 没有数据 for {symbol}")
+                    if iterate == "page":
+                        log.info(f"[{self.endpoint_name}] 第 {symbol} 页为空，翻页结束")
+                    else:
+                        log.warning(f"[{self.endpoint_name}] 没有数据 for {symbol}")
                     missing_symbols.append(symbol)
                     failure = None
                     break
 
                 df = pd.DataFrame(data)
-                df["symbol"] = symbol
+                if iterate == "symbol":
+                    df["symbol"] = symbol                   # 按股票请求：打上请求的代码；其他方式保留数据自带的 symbol
                 df["endpoint"] = self.endpoint_name
                 df_list.append(df)
                 succeed_list.append(symbol)
@@ -171,6 +182,9 @@ class FetchData:
             if failure is not None:
                 log.error(f"[{self.endpoint_name}] {symbol} 最终失败: {failure['error_type']}")
                 failed_list.append(failure)
+
+            if iterate == "page" and missing_symbols and missing_symbols[-1] == symbol:
+                break                                       # 翻到空页，后面的页不再请求
 
         # session 由创建者负责关闭（with 语句或手动 close()），这里不关，便于同一实例多次调用复用连接
         full_df = pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()

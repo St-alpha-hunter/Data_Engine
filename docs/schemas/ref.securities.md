@@ -24,18 +24,70 @@
 
 ## Source and lineage
 
-- **建档名单**：S&P 500 历史成分（GitHub `fja05680/sp500` 的 `sp500_ticker_start_end.csv`，2010 年以后约 848 个代码）。注意它的代码有时是公司**后来的代码**（如把 2006 年的谷歌记成 GOOGL），不能直接当作当时的代码使用
+- **建档名单**：S&P 500 历次调入 / 调出事件（`events.sp500_index_changes`，来自 GitHub `fja05680/sp500`），只保留 **2010 年以后还在指数里**的证券。注意这份数据的代码有时是公司**后来的代码**（比如把 2006 年的谷歌记成 GOOGL），不能直接当作当时的代码使用
 - **字段来源**：
 
 | 字段 | 来源 |
 |---|---|
-| `name`、`security_type`、`country`、`primary_exchange`、`first_trade_date` | FMP `profile`（仍在交易的）、SEC EDGAR（已退市的） |
-| `last_trade_date`、`status` | FMP 日线最后一天 / 退市事件 |
-| `delisting_reason` | 收购事件等 |
-| `review_status` | 匹配过程：对不上、不确定的标 `needs_review`，人工核对后改 `verified` |
+| `name`、`security_type`、`country`、`primary_exchange`、`first_trade_date` | FMP `profile`（按代码查，只有当前状态）；没有可用 profile 时，名称取收购记录或代码变更里的公司名，首个交易日用首次进入指数的日期（近似） |
+| `status`、`last_trade_date` | 还在指数里或 profile 显示仍在交易 → `active`；否则取 FMP 日线最后一天，查不到时用调出指数前一天（近似） |
+| `delisting_reason` | 收购事件（被收购方用过这只证券的代码，且文件日在最后交易日之前） |
+| `review_status` / `notes` | 生成过程中的核对结果，见下文 |
 
-- **写入方**：证券主表的生成脚本（待写），之后由事件流（代码变更、退市、收购）维护
-- **下游**：`ref.security_identifiers.security_id` 外键引用本表；以后事件总表、成分股区间、行情都关联 `security_id`
+- **写入方**：[`pipelines/security_master.py`](../../pipelines/security_master.py)（首次生成）。2026-10-12 事件已回填 `security_id`，**从此只能增量维护**，不能再清空重建
+- **下游**：`ref.security_identifiers.security_id` 外键引用本表；`events.corporate_events.security_id`、`events.acquisitions.acquirer_security_id` 已回填；以后成分股区间、行情也关联 `security_id`
+
+### 生成流程
+
+```bash
+python -m pipelines.security_master build                        # 主表为空时生成
+python -m pipelines.security_master build --rebuild --use-cache  # 清空重建（事件已回填后会拒绝）；--use-cache 用缓存的 profile
+```
+
+1. **算成分区间**：每个代码的调入 / 调出配对，得到 [调入, 调出)
+2. **串成证券候选**：
+   - 有代码变更 X→Y，且 X 的调出、Y 的调入都在改名日前后 3 天内 → 同一只证券
+   - 人工串联：`symbol_change_fixes.csv` 里标 `link` 的
+   - 同一代码的多段区间先合并
+3. **拆开被重复使用的代码**：同一代码有多段区间，且 profile 上市日晚于第一段开始、不晚于后面某段开始，说明是两家公司，在那里拆开（HLT、DELL、DOW、CEG、CCI、CNC）。前面那只是老公司，不用 profile
+4. **按人工对照拆分**：同一个代码下有多个 `security` 标签的，拆成多只证券，成分区间按时间段切开（如 FOXA：21 世纪福克斯 / 新福克斯）
+5. **核对、补字段**：
+   - profile 上市日晚于首次进入指数：如果已经调出指数，认为代码被别人拿去用了，不用 profile（APC、GENZ、SBNY）；如果还在指数里，认为 FMP 写的是重组日期，仍用 profile，但 CIK / CUSIP / ISIN 从上市日起生效（ED、HON、NEE）
+   - CIK 优先级：人工对照 → profile → SEC 代码表（仍在交易的要和 SEC 交叉核对）→ 收购记录
+   - 代码历史：以成分区间里的代码为基础，用 FMP 代码变更补上漏掉的改名（只补到调出指数为止）
+6. **写库**：在一个事务里完成。代码冲突（排除约束）时只跳过那一条，这只证券标 `needs_review`。同时生成报告 `data/security_master_review.csv`
+7. **`review_status`**：有人工对照的是 `verified`；所有检查都通过的是 `auto`；其余是 `needs_review`，原因写在 `notes` 里
+
+### 人工配置
+
+| 文件 | 内容 |
+|---|---|
+| [`config/security_overrides.csv`](../../config/security_overrides.csv) | 人工对照：某个代码（`anchor_symbol`）的代码历史以人工为准。`security` 列不同，表示同一个代码下是不同的证券；`name`、`cik` 用于没有 profile 的老公司。目前包括 GOOG/GOOGL、AABA、FOXA/FOX、NWSA/NWS、IR、HWM、LHX、GL、CPRI、UA |
+| [`config/symbol_change_fixes.csv`](../../config/symbol_change_fixes.csv) | `link`：人工把两个代码串成同一只证券（HRS→LHX 等，调出 / 调入日和改名日差太多）；`ignore`：忽略 FMP 的错误代码变更（如 POM→EXC 其实是收购） |
+
+**2026-10-12 生成结果**：共 820 只（active 604、delisted 216）；`auto` 655、`verified` 15、`needs_review` 150；代码冲突 0。`needs_review` 里主要是已退市、FMP 没有数据的证券（缺 CIK、最后交易日是近似值），另有 8 只仍在交易、上市日偏晚的（AEE、BNY、ED、FE、HON、NEE、SNA、XEL）。生成后人工改了 4 只拆出来的老公司名称（CEG、DOW、DELL、Q），原因记在 `notes` 里。
+
+### 回填事件之后怎么维护
+
+主表已经被事件引用，**不能删证券、不能清空重建**，只能在原来的证券上改。日常维护用 [`pipelines/security_maintenance.py`](../../pipelines/security_maintenance.py)，默认只试算、出报告（`data/security_maintenance_report.csv`），加 `--apply` 才写库；每个动作一个事务，可以重复执行。
+
+```bash
+# 每天的顺序
+python -m pipelines.event_loader sp500 / symbol_change / acquisition ...   # 导入新事件
+python -m pipelines.security_maintenance --apply                            # 改名、新调入、退市
+python -m pipelines.event_security_backfill --apply                         # 补分红、拆股等事件的 security_id
+```
+
+| 动作 | 触发条件 | 做什么 |
+|---|---|---|
+| 改名 | 还没对应上的代码变更 X→Y，改名前一天用 X 的是主表里的证券，且 X 现在还没结束 | X 在改名日结束，从改名日开始用 Y（`source = fmp_symbol_change`，记 `event_id`）；回填这条事件；`notes` 里记一笔。Y 那天已被别的证券占着，或者在 `ignore` 名单里 → 不改（前者进报告） |
+| 新调入 | 2010 年以后、还没对应上的调入事件，调入日主表里没人用这个代码 | 新建证券：拉 profile 和 SEC CIK，用和首次生成同一套 `build_record` 组装（检查规则、`review_status` 一样）；回填这条事件 |
+| 退市 | 仍是 active、最近一次成分事件是调出的证券，最近 60 天日线的最后一天早于 10 天前 | `status = delisted`，最后交易日取日线最后一天；被收购的（收购记录里是被收购方，文件日在最后交易日前两年以内）填 `acquired`，否则退市原因留空、标 `needs_review`；所有还没结束的代码在最后交易日的下一天结束 |
+| 不处理、进报告 | 改名的新代码已被别的证券占着；一条日线都拉不到 | 人工核对 |
+
+**人工修正**：直接 UPDATE，在 `notes` 里写明原因和日期；核对完的改成 `verified`。
+
+**还没做的**：定期用 SEC 代码表和 FMP profile 对一遍仍在交易的证券（CIK、名称、交易所的变化）；改名后公司名称不会自动更新。
 
 ## Schemas
 

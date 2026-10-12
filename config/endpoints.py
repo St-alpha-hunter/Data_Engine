@@ -14,6 +14,7 @@ SYMBOL_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/r
 #   required_params       调用时必须传入的参数
 #   source_logic_version  FMP 计算口径版本；FMP 改了口径就 +1，写入 raw 时带上
 #   raw_table             原始数据落库的 ClickHouse 表（已建表的接口才有）
+#   iterate               请求方式：symbol（默认，每只股票一个请求）/ none（一次请求全市场）/ page（按页翻，遇空页停止）
 FMP_ENDPOINTS = {
     "symbol": {
         "url":"https://raw.githubusercontent.com/datasets/s-and-p-500-companies/refs/heads/main/data/constituents.csv",
@@ -79,6 +80,53 @@ FMP_ENDPOINTS = {
     "analyst_grades":{
         "url":"https://financialmodelingprep.com/stable/grades-historical?symbol={symbol}&apikey={apikey}",
         "required_params":[],
+        "source_logic_version": 1
+    },
+    # ===== 证券主表 =====
+    # 公司概况（按股票查）：CIK、ISIN、CUSIP、上市日期、交易所、是否 ADR / ETF / 仍在交易
+    # 注意：只有当前状态；代码被重复使用时返回的是现在用这个代码的公司（如 FB 现在是一只 ETF）
+    "profile":{
+        "url":"https://financialmodelingprep.com/stable/profile?symbol={symbol}&apikey={apikey}",
+        "required_params":[],
+        "source_logic_version": 1
+    },
+    # ===== 公司事件 =====
+    # 按股票查全部历史（补历史用）
+    "dividends":{
+        "url":"https://financialmodelingprep.com/stable/dividends?symbol={symbol}&apikey={apikey}",
+        "required_params":[],
+        "source_logic_version": 1
+    },
+    "splits":{
+        "url":"https://financialmodelingprep.com/stable/splits?symbol={symbol}&apikey={apikey}",
+        "required_params":[],
+        "source_logic_version": 1
+    },
+    # 日历（每天增量用）：单次最多返回 4000 条，每次只查 1 天；当前套餐只能查最近约一年和未来
+    "dividends_calendar":{
+        "url":"https://financialmodelingprep.com/stable/dividends-calendar?from={from_date}&to={to_date}&apikey={apikey}",
+        "required_params":["from_date","to_date"],
+        "iterate": "none",
+        "source_logic_version": 1
+    },
+    "splits_calendar":{
+        "url":"https://financialmodelingprep.com/stable/splits-calendar?from={from_date}&to={to_date}&apikey={apikey}",
+        "required_params":["from_date","to_date"],
+        "iterate": "none",
+        "source_logic_version": 1
+    },
+    # 全市场代码变更：一次返回全部历史
+    "symbol_change":{
+        "url":"https://financialmodelingprep.com/stable/symbol-change?limit=100000&apikey={apikey}",
+        "required_params":[],
+        "iterate": "none",
+        "source_logic_version": 1
+    },
+    # 并购：按页往前翻（每页 100 条），翻到空页停止
+    "mergers_acquisitions":{
+        "url":"https://financialmodelingprep.com/stable/mergers-acquisitions-latest?page={page}&limit=100&apikey={apikey}",
+        "required_params":[],
+        "iterate": "page",
         "source_logic_version": 1
     },
     # 交易所节假日：这里的 symbol 传交易所名（NYSE / NASDAQ）

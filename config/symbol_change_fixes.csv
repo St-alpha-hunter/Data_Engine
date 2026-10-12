@@ -1,0 +1,9 @@
+action,old_symbol,new_symbol,change_date,note
+link,HRS,LHX,,"Harris → L3Harris 是同一只证券；指数数据调出 / 调入日（2019-06-01）和改名日（2019-07-01）差一个月，自动串联串不上"
+link,TMK,GL,,"Torchmark → Globe Life；调出 / 调入日 2019-08-08，改名日 2019-08-16"
+link,KORS,CPRI,,"Michael Kors → Capri；指数数据里两个代码的区间对不上"
+link,ARNC,HWM,,"Arconic → Howmet；调出 / 调入日 2020-04-06，改名日 2020-04-01"
+ignore,POM,EXC,2016-03-22,"Exelon 收购 Pepco，不是改名；FMP 记成了代码变更"
+ignore,AA,HWM,2016-11-01,"FMP 的错误记录：2016-11-01 是 Alcoa 改名 Arconic（AA → ARNC），HWM 是 2020 年才有的"
+ignore,NWSA,TFCFA,2013-07-05,"FMP 的错误记录：2013 年老新闻集团改名 21 世纪福克斯，代码是 FOXA，不是 TFCFA"
+ignore,NWS,TFCF,2013-07-05,"同上（B 类股）"

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-拆股事件的**明细**，包括拆股、合股（反向拆股）、股票股利：生效日、拆股比例、类型。
+拆股事件的**明细**，包括拆股、合股（反向拆股）、股票股利，以及 FMP 记录的**价格调整**（合并、分拆、特别分配）：生效日、比例、类型。
 
 与事件总表 [`events.corporate_events`](events.corporate_events.md) **一对一**（按 `event_id`）。
 
@@ -36,7 +36,20 @@
 | `effective_date` | `date` | 生效日；也是总表的 `event_date` |
 | `numerator` | `numerator` | 按原值保存，可以不是整数 |
 | `denominator` | `denominator` | 同上 |
-| `split_type` | `splitType` | `stock-dividend` → `stock_dividend`；`stock-split` 或空（约 13% 为空）→ 按比例推导 `forward` / `reverse` |
+| `split_type` | `splitType` | `stock-dividend` 且比例 > 1 → `stock_dividend`；`stock-dividend` 且比例 < 1 → `adjustment`；`stock-split` 或空（约 13% 为空）→ 按比例推导 `forward` / `reverse` |
+
+- **`adjustment`（价格调整）**：FMP 把合并、分拆、特别分配对股价的影响，记成"比例小于 1 的 stock-dividend"。它们不是真正的股数变化，但复权时需要，所以单独用这个类型保存，比例按原值保存。首次导入共 13 条：
+
+| 股票 | 日期 | 比例 | 实际事件 |
+|---|---|---|---|
+| BK / BNY | 2007-07-02 | 4717:5000 | 纽约银行与梅隆金融合并 |
+| VTR | 2015-08-18 | 8757:10000 | 分拆 CCP |
+| JCI | 2016-09-06 | 191:200 | 江森自控与泰科合并 |
+| AIV | 2020-12-01 | 807:1000 | 分拆 AIR |
+| SLG | 2021、2022 | 971:1000、97:100 | 特别股息（部分以股票支付） |
+| 其他 | | | SJM 2002、FERG 2012/2013/2018、AVB 2013、AIV 2019 |
+
+  这类比例在复权时具体怎么使用（方向、是否与 FMP 复权价一致），等不复权价接入、做复权核对时再验证
 
 - **注意 GOOGL 2014-04-03 记为 `999:500`**（不是整齐的 2:1）：那次是谷歌发行 C 类股（GOOG），比例里带了调整系数。所以比例按原值保存，不假定为整数
 - **数据不全怎么办**：计划在不复权价接入后，用"复权因子跳动 / 不复权价断层 ↔ 拆股事件"互相核对（作为 C 步骤的一组新规则，计划中）
@@ -51,7 +64,7 @@
 | `numerator` | numeric | 否 | 拆股后股数（分子） |
 | `denominator` | numeric | 否 | 拆股前股数（分母） |
 | `split_ratio` | numeric | 否 | **生成列** = `numerator / denominator`，自动计算、不能手工修改。4 拆 1 为 4，1 合 20 为 0.05 |
-| `split_type` | text | 否 | `forward` 拆股 / `reverse` 合股 / `stock_dividend` 股票股利 |
+| `split_type` | text | 否 | `forward` 拆股 / `reverse` 合股 / `stock_dividend` 股票股利 / `adjustment` 价格调整（[017](../../sql/postgres/017_splits_adjustment_type.sql) 新增） |
 
 ### 约束与触发器
 
@@ -61,8 +74,8 @@
 | `fk_splits_event` | `event_id` 必须存在于总表 |
 | `chk_splits_positive` | 分子、分母都 > 0 |
 | `chk_splits_not_one_to_one` | 分子 ≠ 分母（1:1 不算拆股） |
-| `chk_splits_type` | 只能是 3 种类型 |
-| `chk_splits_type_matches_ratio` | `reverse` ⇔ 分子 < 分母；拆股和股票股利都会增加股数（分子 > 分母） |
+| `chk_splits_type` | 只能是 4 种类型 |
+| `chk_splits_type_matches_ratio` | 按类型检查：`forward` / `stock_dividend` 分子 > 分母（股数增加）；`reverse` 分子 < 分母；`adjustment` 不限方向 |
 | `trg_splits_check` | 通用触发器 `events.check_detail_event('split', 'effective_date')`：事件类型必须是 `split`；生效日必须等于总表 `event_date`；只追加（没有可回填列，完全不能修改） |
 
 ## 常用查询

@@ -64,7 +64,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | `meta.data_corrections` | 对问题 / 隔离数据的处理记录 | 一次处理动作（只追加） | [004](../sql/postgres/004_meta_data_corrections.sql) | [data_corrections](schemas/meta.data_corrections.md) |
 | `meta.load_log` | 每个批次写入了哪些表、多少行 | 一次写表 | [006](../sql/postgres/006_meta_load_log.sql) | [load_log](schemas/meta.load_log.md) |
 
-`meta` schema 本身见 [000](../sql/postgres/000_schema_meta.sql)；约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)；ticker → symbol 改名见 [007](../sql/postgres/007_rename_ticker_to_symbol.sql)。issues 去重键与 load_log 中间态见 [008](../sql/postgres/008_issues_version_and_load_intermediate.sql)。交易日历见 [009](../sql/postgres/009_ref_trading_calendar.sql)；证券主表见 [010](../sql/postgres/010_ref_securities.sql)；事件总表见 [011](../sql/postgres/011_events_corporate_events.sql)；分红明细见 [012](../sql/postgres/012_events_dividends.sql)；拆股明细与通用明细触发器见 [013](../sql/postgres/013_events_splits.sql)；代码变更明细见 [014](../sql/postgres/014_events_symbol_changes.sql)；收购明细见 [015](../sql/postgres/015_events_acquisitions.sql)；S&P 500 成分股变更见 [016](../sql/postgres/016_events_sp500_index_changes.sql)。新环境按 000 → 016 顺序执行即可从零重建。
+`meta` schema 本身见 [000](../sql/postgres/000_schema_meta.sql)；约束统一改名见 [005](../sql/postgres/005_rename_constraints.sql)；ticker → symbol 改名见 [007](../sql/postgres/007_rename_ticker_to_symbol.sql)。issues 去重键与 load_log 中间态见 [008](../sql/postgres/008_issues_version_and_load_intermediate.sql)。交易日历见 [009](../sql/postgres/009_ref_trading_calendar.sql)；证券主表见 [010](../sql/postgres/010_ref_securities.sql)；事件总表见 [011](../sql/postgres/011_events_corporate_events.sql)；分红明细见 [012](../sql/postgres/012_events_dividends.sql)；拆股明细与通用明细触发器见 [013](../sql/postgres/013_events_splits.sql)；代码变更明细见 [014](../sql/postgres/014_events_symbol_changes.sql)；收购明细见 [015](../sql/postgres/015_events_acquisitions.sql)；S&P 500 成分股变更见 [016](../sql/postgres/016_events_sp500_index_changes.sql)；拆股表增加 adjustment 类型见 [017](../sql/postgres/017_splits_adjustment_type.sql)；CIK 允许多只证券共用见 [018](../sql/postgres/018_identifiers_cik_shared.sql)。新环境按 000 → 018 顺序执行即可从零重建。
 
 ### PostgreSQL · `data_engine.ref`
 
@@ -75,6 +75,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | `ref.security_identifiers` | 代码历史：symbol / CIK / CUSIP / ISIN 的有效期 | 一只证券一种代码的一段有效期 | [010](../sql/postgres/010_ref_securities.sql) | [security_identifiers](schemas/ref.security_identifiers.md) |
 
 查询接口：`ref.resolve_security(代码类型, 代码, 日期)` → `security_id`；`ref.securities_asof(日期)`；视图 `ref.v_securities_current`（大宽表）。
+证券主表由 `pipelines/security_master.py` 生成（人工配置：`config/security_overrides.csv`、`config/symbol_change_fixes.csv`），事件的 `security_id` 由 `pipelines/event_security_backfill.py` 回填。2026-10-12 已回填，此后主表只能增量维护，不能清空重建。
 
 ### PostgreSQL · `data_engine.events`
 
@@ -82,7 +83,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 |---|---|---|---|---|
 | `events.corporate_events` | 公司事件总表：拆股、分红、代码变更、成分股变更、收购 | 一个事件的一个版本 | [011](../sql/postgres/011_events_corporate_events.sql) | [corporate_events](schemas/events.corporate_events.md) |
 | `events.dividends` | 分红明细：除息日、登记日、派息日、公告日、金额、频率、类型 | 一个分红事件的一个版本（与总表一对一） | [012](../sql/postgres/012_events_dividends.sql) | [dividends](schemas/events.dividends.md) |
-| `events.splits` | 拆股明细（含合股、股票股利）：生效日、分子、分母、比例、类型 | 一个拆股事件的一个版本（与总表一对一） | [013](../sql/postgres/013_events_splits.sql) | [splits](schemas/events.splits.md) |
+| `events.splits` | 拆股明细（含合股、股票股利、价格调整）：生效日、分子、分母、比例、类型 | 一个拆股事件的一个版本（与总表一对一） | [013](../sql/postgres/013_events_splits.sql) | [splits](schemas/events.splits.md) |
 | `events.symbol_changes` | 代码变更明细：生效日、旧代码、新代码 | 一个代码变更事件的一个版本（与总表一对一） | [014](../sql/postgres/014_events_symbol_changes.sql) | [symbol_changes](schemas/events.symbol_changes.md) |
 | `events.sp500_index_changes` | S&P 500 成分股变更明细：调入 / 调出、生效日（以后纳斯达克 100 单独建 `events.nasdaq100_index_changes`） | 一次调入或调出事件的一个版本（与总表一对一） | [016](../sql/postgres/016_events_sp500_index_changes.sql) | [sp500_index_changes](schemas/events.sp500_index_changes.md) |
 | `events.acquisitions` | 收购明细（中立结构）：双方、文件日、完成日；两个视图分别从被收购方 / 收购方视角读 | 一笔收购交易的一个版本（与总表一对一，记在被收购方名下） | [015](../sql/postgres/015_events_acquisitions.sql) | [acquisitions](schemas/events.acquisitions.md) |
@@ -143,7 +144,7 @@ meta.quarantine_records ⟷ meta.quality_issues    通过 (batch_id, symbol, dat
 | 字段 | 类型 | 含义 | 规则 |
 |---|---|---|---|
 | `security_id` | bigint | 证券的内部永久编号 | 主表是 `ref.securities`；自己分配、永不变、不复用。**跨表关联证券一律用它，不用 symbol** |
-| `symbol` | text | 股票代码 | 全项目统一用 `symbol`（与 FMP 返回字段一致），meta / raw / golden 表都一样。不要再用 `ticker`；股票列表、计数类字段也用 symbol，如 `n_symbols`、`failed_symbols` |
+| `symbol` | text | 股票代码 | 全项目统一用 `symbol`（与 FMP 返回字段一致），meta / raw / golden 表都一样。不要再用 `ticker`；股票列表、计数类字段也用 symbol，如 `n_symbols`、`failed_symbols`。**类别股统一用点**（`BRK.B`），FMP 的横杠写法（`BRK-B`）在 `config/symbol_map.py` 登记映射 |
 | `valid_from` / `valid_to` | date | 有效期 | 统一约定 **`[valid_from, valid_to)`：含开始日、不含结束日**；`valid_to` 为空表示仍有效 |
 | `date` | date | 交易日（数据所属日期） | 美东交易日，不带时区；不是入库时间 |
 

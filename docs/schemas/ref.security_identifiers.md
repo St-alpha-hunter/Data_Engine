@@ -28,14 +28,18 @@ security_id=3  symbol  META  [2022-06-09, )          ← 交界日 2022-06-09 �
 
 | source | 内容 |
 |---|---|
-| `fmp_profile` | 仍在交易的证券的当前 symbol / CIK / CUSIP / ISIN |
-| `fmp_symbol_change` | 代码变更（FB → META）：关闭旧代码的一段、开始新代码的一段 |
-| `sec` | SEC EDGAR：退市公司的 CIK |
-| `sp500_github` | S&P 500 历史成分里的代码（需要结合代码变更核对） |
-| `manual` | 人工核对后补录 |
+| `fmp_profile` | FMP profile 里的 CIK / CUSIP / ISIN（只有当前值，有效期从首个交易日开始，是近似值；上市日存疑的从 profile 上市日开始） |
+| `fmp_symbol_change` | 用 FMP 代码变更补上的改名前代码（比如 ATH → WLP → ANTM） |
+| `sec` | SEC 官方代码表里的 CIK（profile 没有 CIK 时才用） |
+| `fmp_acquisition` | 收购记录里被收购方的 CIK（已退市、没有 profile 的） |
+| `sp500_github` | S&P 500 历史成分里的代码 |
+| `manual` | 人工对照（`config/security_overrides.csv`） |
 
-- **`event_id`**：由哪个事件引起（如某次代码变更）。事件总表建好后再加外键
-- **写入方**：证券主表的生成脚本（待写），之后由事件流维护
+**2026-10-12 首次生成时的分布**：symbol 993 条（sp500_github 837、fmp_symbol_change 126、manual 30），CIK 684 条，CUSIP 656 条，ISIN 660 条。
+
+- **CIK / CUSIP / ISIN 的有效期是近似值**：FMP 只给当前值，所以一律从首个交易日开始。如果中间换过（比如谷歌 2015 年重组为 Alphabet，CIK 变了），早年的值是不对的。目前没有历史数据可以补
+- **`event_id`**：由哪个事件引起（如某次代码变更）。首次生成时没有填，以后增量维护改名时填上
+- **写入方**：[`pipelines/security_master.py`](../../pipelines/security_master.py)（首次生成，流程见 [ref.securities](ref.securities.md)）；之后增量维护
 
 ## Schemas
 
@@ -63,7 +67,8 @@ security_id=3  symbol  META  [2022-06-09, )          ← 交界日 2022-06-09 �
 | `chk_security_identifiers_cik_format` | 10 位数字（不足补零，如 `0001326801`） |
 | `chk_security_identifiers_cusip_format` | 9 位 |
 | `chk_security_identifiers_isin_format` | 2 位国家代码 + 9 位 + 1 位校验数字 |
-| `exc_security_identifiers_value_one_security` | **排除约束：同一个代码，同一时间只能指向一只证券**（WB 2009 年前美联银行、2014 年后微博，时间不重叠所以能共存） |
+| `exc_security_identifiers_value_one_security` | **排除约束：同一个 symbol / CUSIP / ISIN，同一时间只能指向一只证券**（WB 2009 年前是美联银行、2014 年后是微博，时间不重叠所以能共存）。**CIK 不受限制**（[018](../../sql/postgres/018_identifiers_cik_shared.sql)）：CIK 代表公司，同一家公司的多类股票共用一个，比如 GOOG 和 GOOGL |
+| `idx_security_identifiers_cik` | 按 CIK 查证券的索引（018） |
 | `exc_security_identifiers_one_value_per_type` | **排除约束：同一只证券、同一种代码，同一时间只能有一个值** |
 
 排除约束需要 `btree_gist` 扩展（010 里已启用）。
@@ -72,7 +77,7 @@ security_id=3  symbol  META  [2022-06-09, )          ← 交界日 2022-06-09 �
 
 | 接口 | 用途 |
 |---|---|
-| `ref.resolve_security(id_type, id_value, date)` | 某个代码在某一天指向哪只证券；没有则返回 NULL |
+| `ref.resolve_security(id_type, id_value, date)` | 某个代码在某一天指向哪只证券；没有则返回 NULL。**按 CIK 查时可能多只共用**，这个函数只返回其中一只，所以按 CIK 查要直接查表 |
 | `ref.securities_asof(date)` | 某一天每只证券的 symbol / CIK / CUSIP / ISIN（回测用当天的代码，不用今天的） |
 | `ref.v_securities_current` | 当前视图（大宽表）：每只证券一行，代码为当前值 |
 

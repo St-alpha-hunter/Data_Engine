@@ -74,8 +74,9 @@ def test_securities_asof_and_current_view(conn, sample):
 # ✅ 约束
 # =========================
 def test_same_symbol_same_time_rejected(conn, sample):
+    # 2005 年 Meta 还没有代码（只违反"同一代码同一时间只能指向一只证券"），而 WB 当时属于美联银行
     with pytest.raises(psycopg.errors.ExclusionViolation, match="exc_security_identifiers_value_one_security"):
-        add_id(conn, sample["meta"], "symbol", "WB", date(2020, 1, 1))
+        add_id(conn, sample["meta"], "symbol", "WB", date(2005, 1, 3), date(2006, 1, 3))
 
 
 def test_two_symbols_same_security_same_time_rejected(conn, sample):

@@ -38,6 +38,7 @@ def split_row(conn, symbol):
     ("RETO", 1, 20, None, "reverse", Decimal("0.05")),                # 不传类型：按比例推导为合股
     ("XYZ", 21, 20, "stock_dividend", "stock_dividend", Decimal("1.05")),
     ("GOOGL", 999, 500, None, "forward", Decimal("1.998")),           # 非整数比例按原值保存
+    ("BK", 4717, 5000, "adjustment", "adjustment", Decimal("0.9434")),  # 价格调整（017）
 ])
 def test_record_and_derive(conn, batch, symbol, num, den, given, expected_type, ratio):
     assert record_split(conn, batch, symbol, date(2020, 8, 31), num, den, given)[2] == "inserted"

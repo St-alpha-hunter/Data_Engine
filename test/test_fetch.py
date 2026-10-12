@@ -247,3 +247,73 @@ def test_session_reusable_and_closed_by_with():
 #     assert isinstance(result, pd.DataFrame)
 #     assert "symbol" in result.index.names
 #     mock_to_parquet.assert_called_once()
+
+
+# =========================
+# ✅ 单次返回上限：按日期分段、顶到上限自动拆开
+# =========================
+from datetime import date as _date
+from urllib.parse import parse_qs, urlparse
+
+from fetch_data import fetch as fetch_module
+
+
+def url_range(call):
+    q = parse_qs(urlparse(call[0][0]).query)
+    return q["from"][0], q["to"][0]
+
+
+@pytest.fixture
+def small_limits(monkeypatch):
+    """把日线接口改成：每段 10 天、单次最多 3 行，方便构造"""
+    cfg = {**fetch_module.FMP_ENDPOINTS["price_volume"], "max_rows": 3, "chunk_days": 10}
+    monkeypatch.setitem(fetch_module.FMP_ENDPOINTS, "price_volume", cfg)
+    return cfg
+
+
+def rows(*dates):
+    return [{"date": d, "close": 1.0} for d in dates]
+
+
+def test_date_windows_cover_range_without_overlap():
+    w = FetchData._date_windows({"from_date": "2020-01-01", "to_date": "2020-01-25"}, 10)
+    assert w == [(_date(2020, 1, 1), _date(2020, 1, 10)), (_date(2020, 1, 11), _date(2020, 1, 20)),
+                 (_date(2020, 1, 21), _date(2020, 1, 25))]
+    assert FetchData._date_windows({"symbol": "X"}, 10) == [None]          # 没有日期参数：不分段
+
+
+def test_chunked_requests(small_limits):
+    fetch, df, summary, succeed, failed = run_fetch(
+        [make_resp(200, rows("2020-01-02")), make_resp(200, rows("2020-01-13", "2020-01-14"))],
+        endpoint_name="price_volume", extra_params={"from_date": "2020-01-01", "to_date": "2020-01-20"})
+    assert [url_range(c) for c in fetch.session.get.call_args_list] == [("2020-01-01", "2020-01-10"), ("2020-01-11", "2020-01-20")]
+    assert list(df["date"]) == ["2020-01-02", "2020-01-13", "2020-01-14"] and succeed == ["AAPL"]
+
+
+def test_window_hitting_limit_is_split(small_limits):
+    """第一段返回 3 行（达到上限，可能被截断）→ 拆成两半重拉，顶到上限的那次数据不要"""
+    fetch, df, summary, succeed, failed = run_fetch(
+        [make_resp(200, rows("2020-01-06", "2020-01-07", "2020-01-08")),    # 01-01~01-10：顶到上限
+         make_resp(200, rows("2020-01-02", "2020-01-03")),                  # 01-01~01-05
+         make_resp(200, rows("2020-01-06", "2020-01-07")),                  # 01-06~01-10
+         make_resp(200, [])],                                               # 01-11~01-20
+        endpoint_name="price_volume", extra_params={"from_date": "2020-01-01", "to_date": "2020-01-20"})
+    assert [url_range(c) for c in fetch.session.get.call_args_list] == [
+        ("2020-01-01", "2020-01-10"), ("2020-01-01", "2020-01-05"), ("2020-01-06", "2020-01-10"), ("2020-01-11", "2020-01-20")]
+    assert list(df["date"]) == ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
+
+
+def test_failed_window_fails_whole_symbol(small_limits):
+    """任一段失败：整只股票失败，不返回前面已拉到的部分（避免只写入半段历史）"""
+    fetch, df, summary, succeed, failed = run_fetch(
+        [make_resp(200, rows("2020-01-02")), make_resp(403)],
+        endpoint_name="price_volume", extra_params={"from_date": "2020-01-01", "to_date": "2020-01-20"})
+    assert df.empty and succeed == [] and [f["error_type"] for f in failed] == ["auth_error"]
+
+
+def test_limit_without_chunking_is_failure(monkeypatch):
+    """配了上限、没配分段的接口：顶到上限算失败（error_type = truncated）"""
+    cfg = {**fetch_module.FMP_ENDPOINTS[MOCK_DATA["end_name"]], "max_rows": 1}
+    monkeypatch.setitem(fetch_module.FMP_ENDPOINTS, MOCK_DATA["end_name"], cfg)
+    _, df, _, succeed, failed = run_fetch([make_resp(200, MOCK_DATA["data"])])
+    assert df.empty and [f["error_type"] for f in failed] == ["truncated"]

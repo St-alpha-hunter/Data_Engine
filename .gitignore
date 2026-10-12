@@ -26,3 +26,6 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# ==== 缓存 =====
+data/security_master_cache.json

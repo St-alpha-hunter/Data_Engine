@@ -25,6 +25,7 @@ FMP 日线行情的**原始数据层**：FMP 返回什么就存什么，外加�
 - **上游**：FMP `historical-price-eod/dividend-adjusted`（[`config/endpoints.py`](../../config/endpoints.py) 的 `price_volume`，已按分红复权）
 - **写入方**：[`pipelines/raw_loader.py`](../../pipelines/raw_loader.py) 的 `ingest("price_volume", symbols, params)`
   1. A：`FetchData` 拉取，结果记入 `meta.ingestion`
+     - **单次返回上限**：FMP 一次最多返回 5000 行，超过时只给**最近的** 5000 行，而且不报错（实测 KO 全量请求只回到 2006-11，实际有 1962 年以来的 16,302 行）。所以按 10 年一段请求（`chunk_days = 3650`，约 2520 行一段）；某段仍达到 5000 行就对半拆开重拉。任一段失败时整只股票算失败、不返回部分数据（`error_type` 为 `truncated` 表示达到上限又没法再拆）
   2. B：`check_structure()` 按本表结构做检查和类型转换，通过后写入本表，记入 `meta.load_log`（layer = `raw`）
 - **结构检查规则**（直接从本表的表结构推导，不需要单独维护）：
   - 非 Nullable 的数据列（`symbol`、`date`）必须存在且不能为空

@@ -15,6 +15,8 @@ SYMBOL_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/r
 #   source_logic_version  FMP 计算口径版本；FMP 改了口径就 +1，写入 raw 时带上
 #   raw_table             原始数据落库的 ClickHouse 表（已建表的接口才有）
 #   iterate               请求方式：symbol（默认，每只股票一个请求）/ none（一次请求全市场）/ page（按页翻，遇空页停止）
+#   max_rows              单次请求最多返回的行数；返回行数达到它视为可能被截断
+#   chunk_days            按 from_date / to_date 分段请求，每段天数（配合 max_rows：顶到上限的段自动对半拆开）
 FMP_ENDPOINTS = {
     "symbol": {
         "url":"https://raw.githubusercontent.com/datasets/s-and-p-500-companies/refs/heads/main/data/constituents.csv",
@@ -25,7 +27,11 @@ FMP_ENDPOINTS = {
         "url": "https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted?symbol={symbol}&from={from_date}&to={to_date}&apikey={apikey}",
         "required_params": ["from_date", "to_date"],
         "source_logic_version": 1,
-        "raw_table": "raw.price_volume_daily"
+        "raw_table": "raw.price_volume_daily",
+        # FMP 单次最多返回 5000 行，超过时只给最近的 5000 行、不报错（实测 KO 全量只回到 2006-11）
+        # 所以按 10 年一段请求（约 2520 行）；某段仍顶到上限会自动对半拆开重拉
+        "max_rows": 5000,
+        "chunk_days": 3650
     },
     "market_cap": {
         "url": "https://financialmodelingprep.com/stable/market-capitalization?symbol={symbol}&apikey={apikey}",

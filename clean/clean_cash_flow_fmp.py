@@ -66,7 +66,7 @@ class CashFlowYear(CleanBasic):
         Rule("CF003", 1, "warning", "只能是流出的科目为正：资本开支、购建固定资产、回购、支付分红",
              check="_check_positive", params={"columns": OUTFLOWS}, detail_columns=tuple(OUTFLOWS)),
         # ---- 表内勾稽 ----
-        Rule("CF004", 1, "danger", "现金净变动 ≠ 经营 + 投资 + 筹资 + 汇率影响（误差 > 1%）",
+        Rule("CF004", 2, "warning", "（v2：由 danger 降为 warning——全量数据里触发比例 3%–7%，疑似口径差异而非数据错误，待分析）现金净变动 ≠ 经营 + 投资 + 筹资 + 汇率影响（误差 > 1%）",
              check="_check_identity",
              params={"total": "netChangeInCash", "parts": ["netCashProvidedByOperatingActivities", "netCashProvidedByInvestingActivities",
                                                            "netCashProvidedByFinancingActivities", "effectOfForexChangesOnCash"]},

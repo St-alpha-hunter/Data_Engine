@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from datetime import datetime
 import logging
@@ -54,11 +55,17 @@ class PriceVolume(CleanBasic):
         Rule("PV002", 1, "danger",  "OHLC 逻辑矛盾：开/收盘价不在最高最低价之间，或最高价 < 最低价",
              check="_check_logic_relation"),
         # v2：跳过价格 <= 0 的行（这类行已由 PV001 隔离，最小值为 0 会让振幅检查必然触发）
-        Rule("PV003", 2, "warning", "单日振幅过大：OHLC 最大值 > 最小值 × (1 + max_range)；价格 <= 0 的行不检查",
-             check="_check_daily_volatility", params={"max_range": 0.15}),
-        Rule("PV004", 1, "warning", "收益率跳变：相邻两日收益率之差的绝对值 > max_jump",
-             check="_check_jump_soar", params={"max_jump": 0.15},
-             detail_columns=("adjClose", "return", "prev_return")),
+        # v3：阈值按这只股票自己的波动率放宽（固定 15% 对高波动股、2020 年这类行情大量误报）
+        Rule("PV003", 3, "warning",
+             "单日振幅过大：OHLC 最大值 > 最小值 × (1 + 阈值)，阈值 = max(max_range, vol_mult × 过去 60 天日收益率标准差)；价格 <= 0 的行不检查",
+             check="_check_daily_volatility", params={"max_range": 0.15, "vol_mult": 4},
+             detail_columns=("adjOpen", "adjHigh", "adjLow", "adjClose", "vol60")),
+        # v2：改为"跳了又回来"（错误报价的典型特征）。v1 只看相邻两日收益率之差，实测 2010 年以来 13,008 条里
+        #     88% 能用财报 / 全市场行情 / 自身波动率解释，是真实行情
+        Rule("PV004", 2, "warning",
+             "跳了又回来：当天涨跌幅 > max(min_jump, vol_mult × 过去 60 天波动率)，且第二天收盘价回到前一天收盘价的 revert_tol 以内",
+             check="_check_jump_soar", params={"min_jump": 0.10, "vol_mult": 4, "revert_tol": 0.03},
+             detail_columns=("adjClose", "prev_close", "next_close", "return", "vol60")),
         Rule("PV005", 1, "danger",  "价格或成交量缺失：adjOpen/adjHigh/adjLow/adjClose/volume 有空值",
              check="_check_missing_values"),
     ]
@@ -73,8 +80,13 @@ class PriceVolume(CleanBasic):
     def _prepare(self, df):
         # FMP 返回按日期倒序（最新在前），先转成每只股票内按日期正序，后面的收益率等时序计算才正确
         df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
-        df["return"] = df.groupby("symbol")["adjClose"].pct_change(fill_method=None)
+        g = df.groupby("symbol")["adjClose"]
+        df["return"] = g.pct_change(fill_method=None)
         df["prev_return"] = df.groupby("symbol")["return"].shift()
+        df["prev_close"] = g.shift(1)
+        df["next_close"] = g.shift(-1)
+        # 过去 60 个交易日（不含当天）的日收益率标准差；不足 20 天时为空，阈值退回固定值
+        df["vol60"] = df.groupby("symbol")["return"].transform(lambda r: r.rolling(60, min_periods=20).std().shift(1))
         return df
 
     # 每个检查返回布尔 Series，True 表示这一行违反规则
@@ -91,14 +103,18 @@ class PriceVolume(CleanBasic):
             | (df["adjClose"] < df["adjLow"])
         )
 
-    def _check_daily_volatility(self, df, max_range):
+    def _check_daily_volatility(self, df, max_range, vol_mult):
         price_max = df[self.PRICE_COLS].max(axis=1)
         price_min = df[self.PRICE_COLS].min(axis=1)
         all_positive = (df[self.PRICE_COLS] > 0).all(axis=1)
-        return all_positive & (price_max > price_min * (1 + max_range))
+        threshold = np.maximum(max_range, (vol_mult * df["vol60"]).fillna(0))
+        return all_positive & (price_max > price_min * (1 + threshold))
 
-    def _check_jump_soar(self, df, max_jump):
-        return (df["prev_return"] - df["return"]).abs() > max_jump
+    def _check_jump_soar(self, df, min_jump, vol_mult, revert_tol):
+        threshold = np.maximum(min_jump, (vol_mult * df["vol60"]).fillna(0))
+        jumped = df["return"].abs() > threshold
+        reverted = (df["next_close"] / df["prev_close"] - 1).abs() < revert_tol
+        return jumped & reverted & (df["prev_close"] > 0)
 
     def _check_missing_values(self, df):
         # NaN 参与比较永远是 False，其他规则抓不到，单独拦截

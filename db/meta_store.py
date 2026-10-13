@@ -55,12 +55,12 @@ def _json_default(obj):
 
 
 def _clean_nan(obj):
-    """NaN 不是合法 JSON，转成 None"""
+    """NaN / ±inf 不是合法 JSON（PostgreSQL 会拒收），转成 None；inf 常见于前一天价格为 0 时算出的收益率"""
     if isinstance(obj, dict):
         return {k: _clean_nan(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_clean_nan(v) for v in obj]
-    if isinstance(obj, float) and np.isnan(obj):
+    if isinstance(obj, float) and not np.isfinite(obj):
         return None
     return obj
 
@@ -345,13 +345,23 @@ class MetaStore:
         with self.conn.transaction(), self.conn.cursor() as cur:
             return self._insert_quarantine(cur, batch_id, endpoint, records)
 
-    def record_validation(self, batch_id: str, endpoint: str, issues: list[dict], records: list[dict]) -> tuple[int, int]:
+    def record_validation(self, batch_id: str, endpoint: str, issues: list[dict], records: list[dict],
+                          replace: bool = False) -> tuple[int, int]:
         """
         清洗校验的结果一次写入：质量问题 + 隔离数据放在同一个事务里，要么都成功，要么都不生效。
         （分开写的话，中途失败会出现"问题记下了、数据却没进隔离区"，那些 danger 行既不在隔离区也不在 golden，凭空消失）
+        replace=True（重新清洗，如规则升版本后）：先删掉这个批次原来的问题记录和待处理的隔离记录，再写新的；
+            这个批次里有已经人工放行 / 丢弃的隔离记录时拒绝，避免冲掉人的决定
         返回 (新增问题数, 新增隔离数)
         """
         with self.conn.transaction(), self.conn.cursor() as cur:
+            if replace:
+                decided = cur.execute("SELECT count(*) FROM meta.quarantine_records WHERE batch_id = %s AND status <> 'pending'",
+                                      (batch_id,)).fetchone()[0]
+                if decided:
+                    raise RuntimeError(f"批次 {batch_id} 有 {decided} 条隔离记录已经人工处理过，不能重新清洗")
+                cur.execute("DELETE FROM meta.quarantine_records WHERE batch_id = %s", (batch_id,))
+                cur.execute("DELETE FROM meta.quality_issues WHERE batch_id = %s", (batch_id,))
             n_issues = self._insert_issues(cur, batch_id, issues)
             n_quarantined = self._insert_quarantine(cur, batch_id, endpoint, records)
         return n_issues, n_quarantined

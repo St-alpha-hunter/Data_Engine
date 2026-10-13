@@ -66,7 +66,7 @@ class BalanceSheetYear(CleanBasic):
         Rule("BS004", 1, "danger", "总资产 ≠ 负债和权益合计（误差 > 0.1%）",
              check="_check_identity", params={"total": "totalAssets", "parts": ["totalLiabilitiesAndTotalEquity"], "rel": 0.001},
              detail_columns=("totalAssets", "totalLiabilitiesAndTotalEquity")),
-        Rule("BS005", 1, "danger", "负债和权益合计 ≠ 总负债 + 总权益（误差 > 0.1%）",
+        Rule("BS005", 2, "warning", "（v2：由 danger 降为 warning——全量数据里触发比例 3%–7%，疑似口径差异而非数据错误，待分析）负债和权益合计 ≠ 总负债 + 总权益（误差 > 0.1%）",
              check="_check_identity", params={"total": "totalLiabilitiesAndTotalEquity", "parts": ["totalLiabilities", "totalEquity"], "rel": 0.001},
              detail_columns=("totalLiabilitiesAndTotalEquity", "totalLiabilities", "totalEquity")),
         Rule("BS006", 1, "warning", "总资产 ≠ 流动资产 + 非流动资产 + 其他资产（误差 > 1%）",

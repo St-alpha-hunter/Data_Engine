@@ -118,7 +118,7 @@ def test_big_range_skips_non_positive_price():
 def test_threshold_comes_from_rule_params(monkeypatch):
     """阈值来自 Rule.params：调大阈值后同一行不再触发"""
     row = ("AAPL", "2022-01-06", 103.0, 130.0, 100.0, 120.0, 1000.0)
-    rules = [r if r.rule_id != "PV003" else type(r)(**{**r.__dict__, "params": {"max_range": 0.50}})
+    rules = [r if r.rule_id != "PV003" else type(r)(**{**r.__dict__, "params": {"max_range": 0.50, "vol_mult": 4}})
              for r in PriceVolume.rules]
     monkeypatch.setattr(PriceVolume, "rules", rules)
     result = PriceVolume(make_df(NORMAL + [row])).validate()
@@ -156,5 +156,32 @@ def test_rule_definitions():
     defs = PriceVolume.rule_definitions()
     assert [d["rule_id"] for d in defs] == ["PV001", "PV002", "PV003", "PV004", "PV005"]
     assert all(d["endpoint"] == "price_volume" for d in defs)
-    assert (defs[2]["rule_version"], defs[2]["params"]) == (2, {"max_range": 0.15})
+    assert (defs[2]["rule_version"], defs[2]["params"]) == (3, {"max_range": 0.15, "vol_mult": 4})
+    assert (defs[3]["rule_version"], defs[3]["params"]) == (2, {"min_jump": 0.10, "vol_mult": 4, "revert_tol": 0.03})
     assert defs[2]["impl"] == "PriceVolume._check_daily_volatility"
+
+
+# =========================
+# ✅ PV003 v3 / PV004 v2：阈值按自身波动率放宽；跳变只抓"跳了又回来"
+# =========================
+def series(closes, symbol="X", start="2022-01-03"):
+    """按收盘价造日线：开高低都等于收盘价（没有日内振幅）"""
+    dates = pd.bdate_range(start, periods=len(closes))
+    return make_df([(symbol, str(d.date()), c, c, c, c, 1000.0) for d, c in zip(dates, closes)])
+
+
+def test_jump_and_revert_flagged_but_one_way_jump_not():
+    flat = [100.0] * 30
+    spike = PriceVolume(series(flat + [140.0, 100.5, 101.0])).validate()        # 涨 40% 第二天回到原位：错误报价
+    assert [str(i["date"].date()) for i in issues_of(spike, "PV004")] == [str(pd.bdate_range("2022-01-03", periods=31)[-1].date())]
+    news = PriceVolume(series(flat + [140.0, 141.0, 139.0])).validate()          # 涨 40% 后站稳：真实行情（如财报）
+    assert issues_of(news, "PV004") == []
+
+
+def test_volatile_stock_gets_wider_threshold():
+    rng = np.random.default_rng(0)
+    noisy = list(100 * np.cumprod(1 + rng.normal(0, 0.08, 80)))                 # 日波动率约 8%
+    df = series(noisy)
+    df.loc[df["date"] == df["date"].max(), "adjHigh"] *= 1.20                   # 最后一天振幅约 20%
+    result = PriceVolume(df).validate()
+    assert issues_of(result, "PV003") == []                                     # 4 × 8% = 32% > 20%：不报

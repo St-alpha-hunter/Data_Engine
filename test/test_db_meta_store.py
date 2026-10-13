@@ -294,12 +294,12 @@ from clean.clean_price_volume_fmp_dev import PriceVolume
 
 def test_sync_rules_from_code(store):
     result = store.sync_rules(PriceVolume.rule_definitions())
-    assert result["unchanged"] == ["PV001", "PV002", "PV004"]   # 002 里已经有 v1
-    assert result["upgraded"] == ["PV003"]                       # 代码里是 v2（跳过价格 <= 0 的行）
+    assert result["unchanged"] == ["PV001", "PV002"]            # 002 里已经有 v1
+    assert result["upgraded"] == ["PV003", "PV004"]             # 代码里 PV003 是 v3（按波动率放宽）、PV004 是 v2（跳了又回来）
     assert result["inserted"] == ["PV005"]                       # 代码里新加的
     active = store.active_rules("price_volume")
     assert set(active) == {"PV001", "PV002", "PV003", "PV004", "PV005"}
-    assert active["PV003"]["rule_version"] == 2
+    assert active["PV003"]["rule_version"] == 3
 
     # 再同步一次：什么都不变
     again = store.sync_rules(PriceVolume.rule_definitions())
@@ -309,9 +309,9 @@ def test_sync_rules_from_code(store):
 def test_sync_rules_changed_params_without_bump_rejected(store):
     store.sync_rules(PriceVolume.rule_definitions())
     defs = PriceVolume.rule_definitions()
-    defs[2]["params"] = {"max_range": 0.20}           # 改了 PV003 阈值，没升版本
+    defs[2]["params"] = {"max_range": 0.20, "vol_mult": 4}   # 改了 PV003 阈值，没升版本
     defs.append({**defs[0], "rule_id": "PV999"})      # 同一次同步里还有一条新规则
-    with pytest.raises(ValueError, match="PV003 v2 的 severity/params 与数据库登记的不一致"):
+    with pytest.raises(ValueError, match="PV003 v3 的 severity/params 与数据库登记的不一致"):
         store.sync_rules(defs)
     # 整体回滚：PV999 也没有插进去
     assert "PV999" not in store.active_rules("price_volume")
@@ -320,16 +320,27 @@ def test_sync_rules_changed_params_without_bump_rejected(store):
 def test_sync_rules_version_bump(store):
     store.sync_rules(PriceVolume.rule_definitions())
     defs = PriceVolume.rule_definitions()
-    defs[2].update(rule_version=3, params={"max_range": 0.20})
+    defs[2].update(rule_version=4, params={"max_range": 0.20, "vol_mult": 4})
     result = store.sync_rules(defs)
     assert result["upgraded"] == ["PV003"]
 
     active = store.active_rules("price_volume")["PV003"]
-    assert (active["rule_version"], active["params"]) == (3, {"max_range": 0.20})
+    assert (active["rule_version"], active["params"]) == (4, {"max_range": 0.20, "vol_mult": 4})
     versions = store.conn.execute(
         "SELECT rule_version, is_active FROM meta.quality_rules WHERE rule_id = 'PV003' ORDER BY 1").fetchall()
-    assert versions == [(1, False), (2, False), (3, True)]     # 旧版本保留，只是不生效
+    assert versions == [(1, False), (3, False), (4, True)]     # 旧版本保留，只是不生效
 
-    # 旧代码（v2）再来同步：拒绝
+    # 旧代码（v3）再来同步：拒绝
     with pytest.raises(ValueError, match="低于数据库最高版本"):
         store.sync_rules(PriceVolume.rule_definitions())
+
+
+def test_issue_detail_with_inf_or_nan_is_stored_as_null(store):
+    """前一天价格为 0 时收益率是 inf：JSON 不支持，写库前转成 null，不能让整批清洗失败"""
+    with store.ingestion_run("price_volume", ["X"]) as run:
+        run.finish({"success": 1, "missing": 0, "failed": 0}, [])
+    n = store.record_issues(run.batch_id, [{"rule_id": "PV004", "rule_version": 1, "severity": "warning", "symbol": "X",
+                                            "date": "2011-10-21", "detail": {"prev_return": float("inf"), "r": float("nan"), "c": 1.0}}])
+    assert n == 1
+    detail = store.conn.execute("SELECT detail FROM meta.quality_issues WHERE batch_id = %s", (run.batch_id,)).fetchone()[0]
+    assert detail == {"prev_return": None, "r": None, "c": 1.0}

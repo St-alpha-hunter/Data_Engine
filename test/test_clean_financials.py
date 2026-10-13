@@ -68,13 +68,13 @@ def test_balance_sheet():
     result, issues = run("balance_sheet", [
         BALANCE,
         variant(BALANCE, "UNBAL", totalAssets=310.0),                 # 资产 ≠ 负债和权益 → danger
-        variant(BALANCE, "MINOR", totalLiabilities=210.0),            # WBA：少数股东权益重复计入 → danger
+        variant(BALANCE, "MINOR", totalLiabilities=210.0),            # WBA：少数股东权益重复计入 → BS005（v2 降为 warning）
         variant(BALANCE, "NEG", inventory=-1.0),                      # 存货为负 → warning
         variant(BALANCE, "ND", netDebt=10.0),                         # 净债务对不上 → warning
     ])
     assert "OK" not in issues
     assert "BS004" in issues["UNBAL"] and "BS005" in issues["MINOR"] and issues["NEG"] == {"BS003"} and issues["ND"] == {"BS009"}
-    assert set(result.quarantine_df["symbol"]) == {"UNBAL", "MINOR"}
+    assert set(result.quarantine_df["symbol"]) == {"UNBAL"}
 
 
 # =========================

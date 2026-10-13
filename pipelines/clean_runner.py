@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass
 
 from clean.base_clean import CleanBasic, CleanResult
-from clean.registry import get_cleaner
+from clean.registry import get_cleaner, load_all
 from db import ClickHouseStore, MetaStore
 from db.object_store import IntermediateStore
 from monitoring.feed_error_deputy import FeedErrorDeputy
@@ -47,7 +47,8 @@ class CleanRunResult:
 
 
 def run_clean(batch_id: str, *, store: MetaStore | None = None, ch: ClickHouseStore | None = None,
-              intermediate: IntermediateStore | None = None) -> CleanRunResult:
+              intermediate: IntermediateStore | None = None, reclean: bool = False) -> CleanRunResult:
+    """reclean=True：重新清洗（规则升版本后），替换这个批次原来的问题记录、隔离记录和中间态"""
     store = store or MetaStore()
     ch = ch or ClickHouseStore()
     intermediate = intermediate or IntermediateStore()
@@ -86,7 +87,7 @@ def run_clean(batch_id: str, *, store: MetaStore | None = None, ch: ClickHouseSt
     # ⑤ 问题记录 + 隔离区（同一个事务）
     records = _quarantine_records(result, cleaner_cls)
     with store.load_step(batch_id, "quarantine", "meta.quarantine_records") as step:
-        n_issues, n_quarantined = store.record_validation(batch_id, endpoint, result.issues, records)
+        n_issues, n_quarantined = store.record_validation(batch_id, endpoint, result.issues, records, replace=reclean)
         step.rows = len(records)
 
     # ⑥ 中间态 parquet
@@ -132,12 +133,52 @@ def _quarantine_records(result: CleanResult, cleaner_cls: type[CleanBasic]) -> l
     return [{"symbol": r["symbol"], "date": r["date"], "record": r} for r in rows]
 
 
+def reclean_batches(endpoints: list[str] | None = None, *, store: MetaStore | None = None,
+                    ch: ClickHouseStore | None = None) -> list[tuple[str, str]]:
+    """
+    规则升版本后，把已经写入 raw 的批次全部重新清洗；返回 [(batch_id, 结果或错误)]
+    endpoints 为空时处理所有有清洗类的接口
+    """
+    store = store or MetaStore()
+    ch = ch or ClickHouseStore()
+    rows = store.conn.execute("""
+        SELECT DISTINCT i.batch_id, i.endpoint FROM meta.ingestion i
+        JOIN meta.load_log l ON l.batch_id = i.batch_id AND l.layer = 'raw' AND l.status = 'success' AND l.rows_written > 0
+        WHERE i.status = ANY(%s) AND (%s::text[] IS NULL OR i.endpoint = ANY(%s))
+        ORDER BY i.endpoint, i.batch_id""", (list(CLEANABLE_STATUS), endpoints, endpoints)).fetchall()
+    registry = load_all()
+    out = []
+    for batch_id, endpoint in rows:
+        if endpoint not in registry:
+            continue
+        try:
+            r = run_clean(batch_id, store=store, ch=ch, reclean=True)
+            out.append((batch_id, f"{r.stats}"))
+        except Exception as e:                     # 单个批次失败不影响其他批次
+            log.error(f"批次 {batch_id} 重新清洗失败：{type(e).__name__}: {e}")
+            out.append((batch_id, f"失败：{type(e).__name__}: {e}"))
+    return out
+
+
 def main():
-    parser = argparse.ArgumentParser(description="清洗一个已经写入 raw 的批次")
-    parser.add_argument("batch_id")
+    parser = argparse.ArgumentParser(description="清洗已经写入 raw 的批次")
+    parser.add_argument("batch_id", nargs="?", help="清洗一个批次")
+    parser.add_argument("--reclean", action="store_true",
+                        help="重新清洗（规则升版本后）：替换原来的问题记录、隔离记录和中间态")
+    parser.add_argument("--all", action="store_true", help="配合 --reclean：重新清洗所有批次")
+    parser.add_argument("--endpoints", nargs="*", help="配合 --all：只处理这些接口")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    r = run_clean(args.batch_id)
+    if args.all:
+        if not args.reclean:
+            parser.error("--all 只能和 --reclean 一起用")
+        results = reclean_batches(args.endpoints)
+        failed = [b for b, msg in results if msg.startswith("失败")]
+        print(f"重新清洗 {len(results)} 个批次，失败 {len(failed)} 个：{failed}")
+        return
+    if not args.batch_id:
+        parser.error("需要 batch_id，或者 --reclean --all")
+    r = run_clean(args.batch_id, reclean=args.reclean)
     print(f"批次 {r.batch_id}：raw {r.raw_rows} 行 → {r.stats}")
     print(f"中间态：{r.intermediate_location}")
     if r.report:

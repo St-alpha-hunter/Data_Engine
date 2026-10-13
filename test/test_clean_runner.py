@@ -81,12 +81,12 @@ def test_run_clean_end_to_end(env):
 
     # 规则已同步（PV003 v2、PV005 进了规则表）
     active = store.active_rules("price_volume")
-    assert active["PV003"]["rule_version"] == 2 and "PV005" in active
+    assert active["PV003"]["rule_version"] == 3 and "PV005" in active
 
     # 问题记录 + 隔离区
     issues = store.conn.execute(
         "SELECT rule_id, rule_version, symbol, date::text FROM meta.quality_issues ORDER BY rule_id").fetchall()
-    assert issues == [("PV001", 1, "AAPL", "2022-01-06"), ("PV003", 2, "AAPL", "2022-01-07")]
+    assert issues == [("PV001", 1, "AAPL", "2022-01-06"), ("PV003", 3, "AAPL", "2022-01-07")]
     q = store.conn.execute("SELECT symbol, date::text, status, record FROM meta.quarantine_records").fetchall()
     assert [(s, d, st) for s, d, st, _ in q] == [("AAPL", "2022-01-06", "pending")]
     assert q[0][3]["adjOpen"] == 0.0
@@ -191,3 +191,23 @@ def test_intermediate_default_uses_endpoint_dirs(monkeypatch):
 def test_intermediate_custom_base_url():
     assert IntermediateStore(base_url="s3://bucket/inter").location("price_volume", "b1") == "s3://bucket/inter/price_volume/b1.parquet"
     assert IntermediateStore(base_url="s3://bucket/inter", storage_options={}).is_remote
+
+
+def test_reclean_replaces_issues_and_quarantine(env):
+    """规则升版本后重新清洗：这个批次原来的问题记录、待处理隔离记录被替换，不会重复累积"""
+    clean(env)
+    store = env["store"]
+    store.conn.execute("UPDATE meta.quality_issues SET detail = '{\"old\": true}'")
+    r = run_clean(env["batch_id"], store=store, ch=env["ch"], intermediate=env["intermediate"], reclean=True)
+    assert (r.issues_inserted, r.quarantined_inserted) == (2, 1)
+    assert store.conn.execute("SELECT count(*) FROM meta.quality_issues WHERE detail ? 'old'").fetchone()[0] == 0
+    assert store.conn.execute("SELECT count(*) FROM meta.quarantine_records").fetchone()[0] == 1
+
+
+def test_reclean_refused_after_human_decision(env):
+    clean(env)
+    store = env["store"]
+    qid = store.conn.execute("SELECT quarantine_id FROM meta.quarantine_records").fetchone()[0]
+    store.release(qid, "核对过，没问题", "leon")
+    with pytest.raises(RuntimeError, match="人工处理过"):
+        run_clean(env["batch_id"], store=store, ch=env["ch"], intermediate=env["intermediate"], reclean=True)

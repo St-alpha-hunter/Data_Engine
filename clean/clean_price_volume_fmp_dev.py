@@ -134,6 +134,18 @@ class PriceVolume(CleanBasic):
     ###想办法加上股票名称
 
 
+class PriceVolumeUnadjusted(PriceVolume):
+    """
+    不复权日线：字段和检查规则与复权日线相同（PV001–PV005 共用编号，按 price_volume 登记）
+    PV004（跳了又回来）在不复权价上同样适用：拆股日是单向跳变、不会回到原位，不会被误报
+    """
+    endpoint_name = "price_volume_unadjusted"
+
+    @classmethod
+    def rule_definitions(cls) -> list[dict]:
+        return PriceVolume.rule_definitions()
+
+
 # 临时入口：拉取后直接清洗，pipelines 完成后删除
 if __name__ == "__main__":
     df = pd.read_csv(TEM_SYMBOL, header=None)

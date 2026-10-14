@@ -38,7 +38,7 @@ DEFAULT_CHUNK = 50
 def jobs(to_date: date) -> dict[str, tuple[str, dict | None]]:
     """任务名 → (接口, 参数)"""
     dated = {"from_date": HISTORY_START.isoformat(), "to_date": to_date.isoformat()}
-    out = {"price": ("price_volume", dated)}
+    out = {"price": ("price_volume", dated), "price_unadjusted": ("price_volume_unadjusted", dated)}
     for name, ep in [("income", "income_statement"), ("balance", "balance_sheet"), ("cash", "cash_flow")]:
         out[f"{name}_annual"] = (ep, {"period": "annual", "limit": ANNUAL_LIMIT})
         out[f"{name}_quarter"] = (ep, {"period": "quarter", "limit": QUARTER_LIMIT})
@@ -61,6 +61,7 @@ def jobs(to_date: date) -> dict[str, tuple[str, dict | None]]:
 class Universe:
     symbols: list[str]
     skipped: dict[str, str] = field(default_factory=dict)       # 代码 → 跳过原因
+    security_of: dict[str, int] = field(default_factory=dict)   # 代码 → 证券编号（写 golden 时用同一套对应）
 
 
 def build_universe(conn, today: date | None = None, reused: set[str] | None = None) -> Universe:
@@ -77,15 +78,21 @@ def build_universe(conn, today: date | None = None, reused: set[str] | None = No
         ORDER BY i.security_id, i.valid_from DESC""", (today,)).fetchall()
     if reused is None:
         reused = _reused_from_cache()
-    symbols, skipped = [], {}
+    owners, skipped = {}, {}
     for sid, sym, holder in rows:
         if holder is not None and holder != sid:
             skipped[sym] = f"代码现在属于证券 {holder}"
         elif holder is None and sym in reused:
             skipped[sym] = "代码现在被主表以外的公司使用"
         else:
-            symbols.append(sym)
-    return Universe(sorted(set(symbols)), skipped)
+            owners.setdefault(sym, []).append(sid)
+    security_of = {}
+    for sym, sids in owners.items():
+        if len(sids) == 1:
+            security_of[sym] = sids[0]
+        else:                                  # 两只已退市证券最后都用这个代码：拉回来的数据分不清是谁的
+            skipped[sym] = f"代码是多只证券最后使用的代码：{sids}"
+    return Universe(sorted(security_of), skipped, security_of)
 
 
 def _reused_from_cache() -> set[str]:

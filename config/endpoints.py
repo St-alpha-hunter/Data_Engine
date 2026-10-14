@@ -33,6 +33,16 @@ FMP_ENDPOINTS = {
         "max_rows": 5000,
         "chunk_days": 3650
     },
+    # 不复权日线：字段名也叫 adjOpen / adjClose，但实际是当时真实成交的价格（golden 以它为主）
+    # 同样有单次 5000 行上限，按 10 年一段请求
+    "price_volume_unadjusted": {
+        "url": "https://financialmodelingprep.com/stable/historical-price-eod/non-split-adjusted?symbol={symbol}&from={from_date}&to={to_date}&apikey={apikey}",
+        "required_params": ["from_date", "to_date"],
+        "source_logic_version": 1,
+        "raw_table": "raw.price_volume_unadjusted_daily",
+        "max_rows": 5000,
+        "chunk_days": 3650
+    },
     # 历史市值（每天一行）；原来的 market-capitalization 只返回今天一行，字段相同
     # 和日线一样有单次 5000 行上限，按 10 年一段请求
     "market_cap": {

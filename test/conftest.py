@@ -12,7 +12,7 @@ from db.meta_store import MetaStore
 
 共享的数据库测试夹具：
 - PostgreSQL：独立测试库 data_engine_test，每次运行按 sql/postgres/ 迁移文件从零重建
-- ClickHouse：独立测试库 raw_test，每次运行按 sql/clickhouse/ 建表语句重建（raw. 替换成 raw_test.）
+- ClickHouse：独立测试库 raw_test / golden_test，每次运行按 sql/clickhouse/ 建表语句重建（raw. / golden. 分别替换）
 都不会影响正式库。数据库没启动时，依赖它的测试自动跳过。
 
 """
@@ -23,6 +23,7 @@ META_TABLES = ("events.sp500_index_changes, events.acquisitions, events.symbol_c
                "meta.quality_issues, meta.ingestion, meta.quality_rules")
 
 CH_TEST_DB = "raw_test"
+CH_GOLDEN_TEST_DB = "golden_test"           # golden 的建表语句里 golden. 替换成 golden_test.，测试不会碰正式 golden 库
 CH_DDL = sorted((BASE_DIR / "sql" / "clickhouse").glob("*.sql"))
 
 
@@ -80,20 +81,23 @@ def ch_session():
     except Exception as e:
         pytest.skip(f"ClickHouse 不可用：{e}")
 
-    ch.command(f"DROP DATABASE IF EXISTS {CH_TEST_DB} SYNC")
-    ch.command(f"CREATE DATABASE {CH_TEST_DB}")
+    for db in (CH_TEST_DB, CH_GOLDEN_TEST_DB):
+        ch.command(f"DROP DATABASE IF EXISTS {db} SYNC")
+        ch.command(f"CREATE DATABASE {db}")
     for path in CH_DDL:
-        ddl = path.read_text(encoding="utf-8").replace("raw.", f"{CH_TEST_DB}.")
+        ddl = path.read_text(encoding="utf-8").replace("raw.", f"{CH_TEST_DB}.").replace("golden.", f"{CH_GOLDEN_TEST_DB}.")
         ch.command(ddl)
     yield ch
-    ch.command(f"DROP DATABASE IF EXISTS {CH_TEST_DB} SYNC")
+    for db in (CH_TEST_DB, CH_GOLDEN_TEST_DB):
+        ch.command(f"DROP DATABASE IF EXISTS {db} SYNC")
 
 
 @pytest.fixture
 def ch(ch_session):
-    """每个测试前清空 raw_test 里的表"""
-    tables = ch_session.query_df(
-        "SELECT name FROM system.tables WHERE database = {db:String}", {"db": CH_TEST_DB})["name"]
-    for t in tables:
-        ch_session.command(f"TRUNCATE TABLE {CH_TEST_DB}.{t}")
+    """每个测试前清空 raw_test / golden_test 里的表（视图不用清）"""
+    for db in (CH_TEST_DB, CH_GOLDEN_TEST_DB):
+        tables = ch_session.query_df(
+            "SELECT name FROM system.tables WHERE database = {db:String} AND engine NOT LIKE '%View'", {"db": db})["name"]
+        for t in tables:
+            ch_session.command(f"TRUNCATE TABLE {db}.{t}")
     return ch_session

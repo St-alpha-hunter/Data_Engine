@@ -9,10 +9,12 @@ D：中间态 → golden（目前只有日线：不复权价 + 复权因子）
          · 和 golden 当前版本比对：新的写 version 1；数值或 quality_status 变了写新版本；没变跳过
     2. build_adjustments()：事件库的拆股、现金分红 → golden.adjustment_events（复权因子）
          · 拆股：price_factor = 1 / 比例；现金分红：price_factor = 1 − 每股金额 / 除息前一天不复权收盘价
+         · 分拆（只来自人工修正，事件库没有这类事件）：和现金分红同一算法，value = 每股分到的价值
          · 只算落在这只证券 golden 日线区间里的事件（区间外的事件不影响任何已存价格）
-         · 事件修订（revision 变了）或因子变了写新版本
-    3. check_against_fmp()：我们算的复权收盘价 vs FMP 复权收盘价，偏差 > 0.5% 记问题（GD001，warning）
-         一段连续偏差的日子只记一条（记在这段的第一天），避免一个因子算错刷出上千条
+         · 去重（改过代码的证券新旧代码各拉过一遍）→ 人工修正（config/adjustment_overrides.csv）
+         · 事件修订（revision 变了）或因子变了写新版本；事件没了（被删 / 人工删掉）写 is_active = 0 的版本撤回
+    3. check_against_fmp()：复权后的每日收益率 vs FMP 复权价的每日收益率，相差 > 2% 记问题（GD001 v2，warning）
+         按收益率比：漏一个事件只影响事件那一天的收益率；按价格水平比会让之前几千天都算偏差
 
 命令行：
     python -m pipelines.golden_loader all            # 所有不复权日线批次 → golden，再算复权因子、核对
@@ -39,13 +41,16 @@ log = logging.getLogger(__name__)
 GOLDEN_DB = "golden"
 PRICE_ENDPOINT = "price_volume_unadjusted"
 SKIP_PATH = BASE_DIR / "config" / "golden_skip.csv"
+OVERRIDES_PATH = BASE_DIR / "config" / "adjustment_overrides.csv"
 SOURCE_TO_GOLDEN = {"adjOpen": "open", "adjHigh": "high", "adjLow": "low", "adjClose": "close", "volume": "volume"}
 VALUE_COLS = list(SOURCE_TO_GOLDEN.values())
 CHANGE_REL = 1e-6                  # 相对变化超过它算"有变化"（基本等于有变化就算）
-FMP_TOLERANCE = 0.005              # 复权价和 FMP 复权价偏差超过 0.5% 记问题
+FMP_TOLERANCE = 0.02               # 每日收益率和 FMP 复权价算出的收益率差超过 2% 记问题
 
-GD001 = {"rule_id": "GD001", "rule_version": 1, "endpoint": "golden_price_daily", "severity": "warning",
-         "description": "我们算的复权收盘价（不复权价 × 复权因子）与 FMP 复权收盘价偏差 > 0.5%；一段连续偏差记一条（这段的第一天）",
+# v2：改为按每日收益率比（v1 按价格水平比：漏一个事件，之前几千天都算偏差；22.9 万天里真正影响收益率的只有约 120 天）
+GD001 = {"rule_id": "GD001", "rule_version": 2, "endpoint": "golden_price_daily", "severity": "warning",
+         "description": "复权后的每日收益率与 FMP 复权价的每日收益率相差 > 2%（通常是这一天的拆股 / 分红 / 分拆事件有问题）；"
+                        "两边重叠的最后一天不比（两次拉取时间不同，当天数据可能还在更新）",
          "params": {"tolerance": FMP_TOLERANCE}, "impl": "golden_loader.check_against_fmp"}
 
 
@@ -53,8 +58,47 @@ def load_skip(path=None) -> dict[str, str]:
     path = path or SKIP_PATH
     if not os.path.exists(path):
         return {}
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:      # 兼容带 BOM（Excel 打开不乱码）
         return {r["symbol"].strip().upper(): r["reason"] for r in csv.DictReader(f)}
+
+
+def load_overrides(path=None) -> list[dict]:
+    """人工修正：action = drop（删除事件）/ set_value（改金额或比例）/ add（补事件）"""
+    path = path or OVERRIDES_PATH
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8-sig") as f:      # 兼容带 BOM（Excel 打开不乱码）
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        if r["action"] not in ("drop", "set_value", "add") or r["kind"] not in ("split", "dividend", "spinoff"):
+            raise ValueError(f"adjustment_overrides.csv 有无法识别的行：{r}")
+        r["symbol"] = r["symbol"].strip().upper()
+        r["ex_date"] = pd.Timestamp(r["ex_date"])
+        r["value"] = float(r["value"]) if r.get("value") else None
+    return rows
+
+
+def apply_overrides(ev: pd.DataFrame, overrides: list[dict], security_of: dict[str, int]) -> tuple[pd.DataFrame, dict]:
+    """按人工修正删除 / 改值 / 补事件；找不到对应事件的修正记日志（可能事件库已经改正了，这条修正可以删掉）"""
+    stats = {"dropped": 0, "set_value": 0, "added": 0, "unmatched": 0}
+    for o in overrides:
+        sid = security_of.get(o["symbol"])
+        hit = (ev["security_id"] == sid) & (ev["kind"] == o["kind"]) & (ev["ex_date"] == o["ex_date"])
+        if o["action"] == "add" and sid is not None:
+            ev = pd.concat([ev, pd.DataFrame([{
+                "event_id": 0, "security_id": sid, "ex_date": o["ex_date"], "value": o["value"], "event_revision": 0,
+                "known_at": pd.Timestamp(o["decided_on"], tz="UTC"), "kind": o["kind"]}])], ignore_index=True)
+            stats["added"] += 1
+        elif sid is None or not hit.any():
+            stats["unmatched"] += 1
+            log.warning(f"[golden] 人工修正找不到对应事件：{o['action']} {o['symbol']} {o['kind']} {o['ex_date'].date()}")
+        elif o["action"] == "drop":
+            ev = ev[~hit]
+            stats["dropped"] += int(hit.sum())
+        else:
+            ev.loc[hit, "value"] = o["value"]
+            stats["set_value"] += int(hit.sum())
+    return ev, stats
 
 
 def _changed(new: pd.DataFrame, cur: pd.DataFrame) -> pd.Series:
@@ -174,6 +218,9 @@ def build_adjustments(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     dup = ev.duplicated(["security_id", "kind", "ex_date"])
     stats["duplicates_dropped"] = int(dup.sum())
     ev = ev[~dup].drop(columns="on_symbol")
+    ev["security_id"] = ev["security_id"].astype("uint64")
+    ev, ostats = apply_overrides(ev, load_overrides(), build_universe(store.conn).security_of)
+    stats["overrides"] = ostats
 
     px = ch.query_df(f"SELECT security_id, date, close FROM {db}.v_price_daily WHERE close > 0 ORDER BY date")
     if px.empty:
@@ -189,10 +236,11 @@ def build_adjustments(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     ev = pd.merge_asof(ev.sort_values("ex_date"), px.rename(columns={"date": "prev_date", "close": "prev_close"}),
                        left_on="ex_date", right_on="prev_date", by="security_id",
                        direction="backward", allow_exact_matches=False)
+    # 现金分红和分拆同一算法：分拆就是把子公司股票发给股东，value = 每股分到的价值
     is_split = ev["kind"] == "split"
     ev["price_factor"] = np.where(is_split, 1 / ev["value"], 1 - ev["value"] / ev["prev_close"])
     ev["volume_factor"] = np.where(is_split, ev["value"], 1.0)
-    # 因子必须 > 0（缺前收时是 NaN，也算无效）；分红因子还必须 < 1（金额 >= 前收说明数据有错）
+    # 因子必须 > 0（缺前收时是 NaN，也算无效）；分红 / 分拆因子还必须 < 1（金额 >= 前收说明数据有错）
     bad = ~(ev["price_factor"] > 0) | ((~is_split) & ~(ev["price_factor"] < 1))
     stats["bad_factor"] = int(bad.sum())
     if bad.any():
@@ -200,27 +248,47 @@ def build_adjustments(*, store: MetaStore | None = None, ch: ClickHouseStore | N
                     f"{ev.loc[bad, ['security_id', 'ex_date', 'kind', 'value', 'prev_close']].head(5).to_dict('records')}")
     ev = ev[~bad]
 
+    # 和 golden 当前版本比对（含已撤回的）：新的写 v1；修订 / 因子变了 / 重新出现的写新版本；
+    # golden 里有效、但这次已经没有的（事件被删、被人工修正删掉）写一个 is_active = 0 的新版本撤回
+    key = ["security_id", "ex_date", "kind", "event_id"]
     cur = ch.query_df(f"""
         SELECT security_id, ex_date, kind, event_id, max(version) AS v,
-               argMax(event_revision, version) AS rev_cur, argMax(price_factor, version) AS pf_cur
-        FROM {db}.adjustment_events GROUP BY security_id, ex_date, kind, event_id""").rename(columns={"v": "version"})
-    if not cur.empty:
-        cur["ex_date"] = pd.to_datetime(cur["ex_date"])
-    m = ev.merge(cur, on=["security_id", "ex_date", "kind", "event_id"], how="left") if not cur.empty else ev.assign(
-        version=np.nan, rev_cur=np.nan, pf_cur=np.nan)
-    is_new = m["version"].isna()
-    changed = ~is_new & ((m["event_revision"] != m["rev_cur"]) | (np.abs(m["price_factor"] - m["pf_cur"]) > 1e-9))
+               argMax(value, version) AS value_cur, argMax(prev_close, version) AS prev_close_cur,
+               argMax(price_factor, version) AS pf_cur, argMax(volume_factor, version) AS vf_cur,
+               argMax(event_revision, version) AS rev_cur, argMax(known_at, version) AS known_at_cur,
+               argMax(is_active, version) AS active_cur
+        FROM {db}.adjustment_events GROUP BY security_id, ex_date, kind, event_id""")
+    if cur.empty:
+        cur = pd.DataFrame(columns=key + ["v", "value_cur", "prev_close_cur", "pf_cur", "vf_cur", "rev_cur",
+                                          "known_at_cur", "active_cur"])
+    cur = cur.astype({"security_id": "uint64", "event_id": "uint64"})
+    cur["ex_date"] = pd.to_datetime(cur["ex_date"])
+    ev["event_id"] = ev["event_id"].astype("uint64")
+
+    m = ev.merge(cur, on=key, how="left")
+    is_new = m["v"].isna()
+    changed = ~is_new & ((m["active_cur"] != 1) | (m["event_revision"] != m["rev_cur"])
+                         | (np.abs(m["price_factor"] - m["pf_cur"]) > 1e-9))
     out = m[is_new | changed].copy()
-    out["version"] = (pd.to_numeric(out["version"]).fillna(0) + 1).astype("uint32")
-    stats.update(new=int(is_new.sum()), changed=int(changed.sum()))
-    if not out.empty:
-        out["prev_close"] = out["prev_close"].astype(float)
-        out["event_id"] = out["event_id"].astype("uint64")
-        out["event_revision"] = out["event_revision"].astype("uint32")
-        ch.insert_df(f"{db}.adjustment_events",
-                     out[["security_id", "ex_date", "kind", "value", "prev_close", "price_factor", "volume_factor",
-                          "event_id", "event_revision", "known_at", "version"]])
-    stats["written"] = len(out)
+    out["version"] = (pd.to_numeric(out["v"]).fillna(0) + 1).astype("uint32")
+    out["is_active"] = 1
+
+    gone = cur[cur["active_cur"] == 1].merge(ev[key], on=key, how="left", indicator=True)
+    gone = gone[gone["_merge"] == "left_only"]
+    retract = pd.DataFrame({
+        **{k: gone[k] for k in key}, "value": gone["value_cur"], "prev_close": gone["prev_close_cur"],
+        "price_factor": gone["pf_cur"], "volume_factor": gone["vf_cur"], "event_revision": gone["rev_cur"],
+        "known_at": gone["known_at_cur"], "version": pd.to_numeric(gone["v"]) + 1, "is_active": 0})
+    stats.update(new=int(is_new.sum()), changed=int(changed.sum()), retracted=len(retract))
+
+    cols = ["security_id", "ex_date", "kind", "value", "prev_close", "price_factor", "volume_factor", "is_active",
+            "event_id", "event_revision", "known_at", "version"]
+    write = pd.concat([out[cols], retract[cols]], ignore_index=True) if len(retract) else out[cols]
+    if not write.empty:
+        write = write.astype({"prev_close": float, "event_id": "uint64", "event_revision": "uint32",
+                              "is_active": "uint8", "version": "uint32"})
+        ch.insert_df(f"{db}.adjustment_events", write)
+    stats["written"] = len(write)
     log.info(f"[golden] 复权因子：{stats}")
     return stats
 
@@ -235,7 +303,7 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     # 每次都是全量核对：先清掉上一轮的结果，避免已经不偏差的段一直留着
     store.conn.execute("DELETE FROM meta.quality_issues WHERE rule_id = 'GD001'")
     ours = ch.query_df(f"""
-        SELECT a.security_id, a.date, a.adj_close, p.source_symbol, p.batch_id
+        SELECT a.security_id, a.date, a.adj_close, a.close, p.source_symbol, p.batch_id
         FROM {db}.v_price_daily_adjusted AS a
         INNER JOIN {db}.v_price_daily AS p ON a.security_id = p.security_id AND a.date = p.date
         WHERE a.adj_close > 0""")
@@ -243,29 +311,27 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
         return {"compared": 0, "issues": 0}
     fmp = ch.query_df(f"""
         SELECT symbol AS source_symbol, date, argMax(adjClose, ingested_at) AS fmp_adj_close
-        FROM {raw_table} WHERE symbol IN {{syms:Array(String)}} GROUP BY symbol, date""",
+        FROM {raw_table} WHERE symbol IN {{syms:Array(String)}} AND adjClose > 0 GROUP BY symbol, date""",
         {"syms": sorted(ours["source_symbol"].unique().tolist())})
     d = ours.merge(fmp, on=["source_symbol", "date"], how="inner").sort_values(["security_id", "date"])
-    d["dev"] = d["adj_close"] / d["fmp_adj_close"] - 1
-    d["bad"] = d["dev"].abs() > FMP_TOLERANCE
-    # 一段连续偏差（中间没有恢复正常的日子）记一条
-    d["seg"] = (d["bad"] != d.groupby("security_id")["bad"].shift()).cumsum()
-    segs = d[d["bad"]].groupby("seg").agg(
-        security_id=("security_id", "first"), symbol=("source_symbol", "first"), batch_id=("batch_id", "first"),
-        start=("date", "min"), end=("date", "max"), days=("date", "size"),
-        max_dev=("dev", lambda s: float(s.abs().max())), first_ours=("adj_close", "first"),
-        first_fmp=("fmp_adj_close", "first"))
-    issues = []
-    for batch_id, g in segs.groupby("batch_id"):
-        issues = [{"rule_id": "GD001", "rule_version": 1, "severity": "warning", "symbol": r.symbol, "date": r.start,
-                   "detail": {"security_id": int(r.security_id), "end": str(r.end), "days": int(r.days),
-                              "max_deviation": round(r.max_dev, 6), "ours": float(r.first_ours), "fmp": float(r.first_fmp)}}
-                  for r in g.itertuples()]
-        store.record_issues(batch_id, issues)
-    stats = {"compared": len(d), "deviating_days": int(d["bad"].sum()), "segments": len(segs),
-             "securities": int(segs["security_id"].nunique()) if len(segs) else 0,
-             "median_abs_dev": float(d["dev"].abs().median())}
-    log.info(f"[golden] 和 FMP 复权价核对：{stats}")
+    # 两边重叠的最后一天不比：两次拉取时间不同，当天收盘数据可能还在更新
+    d = d[d["date"] < d.groupby("security_id")["date"].transform("max")].copy()
+    g = d.groupby("security_id")
+    d["r_ours"] = g["adj_close"].pct_change()
+    d["r_fmp"] = g["fmp_adj_close"].pct_change()
+    d["r_unadj"] = g["close"].pct_change()
+    d = d.dropna(subset=["r_ours", "r_fmp"]).copy()
+    d["diff"] = d["r_ours"] - d["r_fmp"]
+    bad = d[d["diff"].abs() > FMP_TOLERANCE]
+    for batch_id, gg in bad.groupby("batch_id"):
+        store.record_issues(batch_id, [
+            {"rule_id": "GD001", "rule_version": GD001["rule_version"], "severity": "warning", "symbol": r.source_symbol,
+             "date": r.date, "detail": {"security_id": int(r.security_id), "r_ours": round(r.r_ours, 6),
+                                        "r_fmp": round(r.r_fmp, 6), "r_unadjusted": round(r.r_unadj, 6)}}
+            for r in gg.itertuples()])
+    stats = {"compared": len(d), "issues": len(bad), "securities": int(bad["security_id"].nunique()),
+             "over_10pct": int((bad["diff"].abs() > 0.10).sum())}
+    log.info(f"[golden] 和 FMP 复权收益率核对：{stats}")
     return stats
 
 

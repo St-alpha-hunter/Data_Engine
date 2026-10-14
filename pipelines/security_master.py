@@ -285,7 +285,7 @@ def load_overrides(path=OVERRIDES_PATH) -> dict[str, list[dict]]:
     overrides = defaultdict(list)
     if not os.path.exists(path):
         return overrides
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:      # 兼容带 BOM（Excel 打开不乱码）
         for row in csv.DictReader(f):
             overrides[row["anchor_symbol"].strip().upper()].append({
                 "symbol": row["symbol"].strip().upper(),
@@ -305,7 +305,7 @@ def load_change_fixes(path=CHANGE_FIXES_PATH) -> tuple[list[tuple[str, str]], se
     links, ignore = [], set()
     if not os.path.exists(path):
         return links, ignore
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:      # 兼容带 BOM（Excel 打开不乱码）
         for row in csv.DictReader(f):
             old, new = row["old_symbol"].strip().upper(), row["new_symbol"].strip().upper()
             if row["action"] == "link":

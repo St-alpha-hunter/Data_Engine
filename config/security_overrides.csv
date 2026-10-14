@@ -1,4 +1,4 @@
-anchor_symbol,security,symbol,valid_from,valid_to,share_class,name,cik,note
+﻿anchor_symbol,security,symbol,valid_from,valid_to,share_class,name,cik,note
 GOOGL,,GOOG,2004-08-19,2014-04-03,A,,,"Alphabet A 类股：2004 年上市时代码是 GOOG；2014-04-03 发行 C 类股时改用 GOOGL"
 GOOGL,,GOOGL,2014-04-03,,A,,,"Alphabet A 类股"
 GOOG,,GOOG,2014-04-03,,C,,,"Alphabet C 类股（无投票权）：2014-04-03 发行，代码 GOOG；FMP 给它补出的 2014 年以前历史是从 A 类股复制的"

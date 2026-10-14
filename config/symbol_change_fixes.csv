@@ -1,4 +1,4 @@
-action,old_symbol,new_symbol,change_date,note
+﻿action,old_symbol,new_symbol,change_date,note
 link,HRS,LHX,,"Harris → L3Harris 是同一只证券；指数数据调出 / 调入日（2019-06-01）和改名日（2019-07-01）差一个月，自动串联串不上"
 link,TMK,GL,,"Torchmark → Globe Life；调出 / 调入日 2019-08-08，改名日 2019-08-16"
 link,KORS,CPRI,,"Michael Kors → Capri；指数数据里两个代码的区间对不上"

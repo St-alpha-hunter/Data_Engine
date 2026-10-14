@@ -33,6 +33,69 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 首次启动时执行的初始化 SQL
 
+  # ===================== Airflow 3.3.2（LocalExecutor，不需要 Celery / Redis）=====================
+  # 镜像：docker/airflow/Dockerfile（官方镜像 + 项目依赖）；元数据库：postgres 容器里的 airflow 库
+  # 项目目录挂到 /opt/airflow/project，任务直接调用 pipelines/ 里的函数；DAG 放项目的 dags/ 目录
+  # 网页：http://localhost:8081（本机 8080 被 httpd 占用）；本地使用，不需要登录
+  airflow-init:
+    &airflow-common
+    build: ./docker/airflow
+    image: data-engine-airflow:3.3.2
+    env_file: .env                         # FMP_API_KEY、SEC_USER_AGENT、数据库密码等
+    environment:
+      &airflow-common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Shanghai
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+      # 容器里连数据库用容器名和容器内端口（覆盖 .env 里给本机用的 localhost:5433）
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      PYTHONPATH: /opt/airflow/project
+    volumes:
+      - .:/opt/airflow/project
+      - ./dags:/opt/airflow/dags
+      - ./data/airflow/logs:/opt/airflow/logs
+    depends_on:
+      - postgres
+      - clickhouse
+    command: db migrate                    # 只做元数据库初始化 / 升级，跑完就退出
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
 volumes:
   clickhouse_data:
   postgres_data:

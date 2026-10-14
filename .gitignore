@@ -29,3 +29,8 @@ Thumbs.db
 
 # ==== 缓存 =====
 data/security_master_cache.json
+# tools/pull_image_via_proxy.py 下载的 Docker 镜像（GB 级）
+data/image_cache/
+# Airflow 任务日志
+data/airflow/
+

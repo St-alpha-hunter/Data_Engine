@@ -184,8 +184,9 @@ def test_intermediate_default_uses_endpoint_dirs(monkeypatch):
     from config.paths import VOLUME_DATA_PATH, DATA_DIR
     monkeypatch.delenv("INTERMEDIATE_URL", raising=False)
     s = IntermediateStore()
-    assert s.location("price_volume", "b1") == str(VOLUME_DATA_PATH / "b1.parquet")
-    assert s.location("not_registered", "b1") == str(DATA_DIR / "not_registered" / "b1.parquet")
+    # 记录的是相对路径（跨系统可用），解析后落在登记的目录
+    assert s.resolve(s.location("price_volume", "b1")) == str(VOLUME_DATA_PATH / "b1.parquet")
+    assert s.resolve(s.location("not_registered", "b1")) == str(DATA_DIR / "not_registered" / "b1.parquet")
 
 
 def test_intermediate_custom_base_url():

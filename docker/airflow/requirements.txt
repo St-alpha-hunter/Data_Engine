@@ -1,0 +1,5 @@
+# Airflow 容器里额外要装的项目依赖（官方镜像已带 pandas / numpy / pyarrow / requests / python-dotenv / psycopg，不重复装、不改版本）
+# 版本和本机 backtrader-env 对齐，保证容器里和本机跑出来的结果一致
+clickhouse-connect==0.15.1
+exchange_calendars==4.13.2
+psycopg[binary]==3.3.5

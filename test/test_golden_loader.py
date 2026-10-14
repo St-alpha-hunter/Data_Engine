@@ -21,6 +21,7 @@ DAYS = [d.date() for d in pd.bdate_range("2022-01-03", "2022-01-14")]      # 10 
 @pytest.fixture
 def env(store, ch, tmp_path, monkeypatch):
     monkeypatch.setattr(gl, "SKIP_PATH", tmp_path / "skip.csv")
+    monkeypatch.setattr(gl, "OVERRIDES_PATH", tmp_path / "overrides.csv")      # 不读正式的人工修正
     (tmp_path / "skip.csv").write_text("symbol,reason\nZZQB,测试跳过\n", encoding="utf-8")
     sids = {}
     for sym, first in [("ZZQA", "2022-01-04"), ("ZZQB", "2022-01-03")]:
@@ -102,22 +103,60 @@ def test_adjustments_and_adjusted_prices(env):
     assert vol[D("2022-01-07")] == pytest.approx(2000.0) and vol[D("2022-01-12")] == pytest.approx(1000.0)
 
 
-def test_check_against_fmp_one_issue_per_segment(env):
+def test_check_against_fmp_by_daily_return(env):
+    """按每日收益率比：FMP 第 3、4 天都高 10%（一段价格偏差），只有进入和离开这段的两天收益率不同"""
     b = make_batch(env, {"ZZQA": closes()})
     load(env, b)
     record_events(env)
     gl.build_adjustments(store=env["store"], ch=env["ch"], db=DB, today=D("2026-10-13"))
     ours = env["ch"].query_df(f"SELECT date, adj_close FROM {DB}.v_price_daily_adjusted ORDER BY date")
     fmp = ours["adj_close"].tolist()
-    fmp[2], fmp[3] = fmp[2] * 1.1, fmp[3] * 1.1                            # 连续两天偏差 10%：一段
+    fmp[2], fmp[3] = fmp[2] * 1.1, fmp[3] * 1.1
+    fmp[-1] = fmp[-1] * 1.5                                                  # 最后一天：拉取时间不同，不比
     raw = pd.DataFrame({"symbol": "ZZQA", "date": pd.to_datetime(ours["date"]).dt.date, "adjOpen": fmp, "adjHigh": fmp,
                         "adjLow": fmp, "adjClose": fmp, "volume": 1000.0, "extra": "{}", "batch_id": "fmp_test"})
     env["ch"].insert_df("raw_test.price_volume_daily", raw)
     s = gl.check_against_fmp(store=env["store"], ch=env["ch"], db=DB, raw_table="raw_test.price_volume_daily")
-    assert (s["deviating_days"], s["segments"]) == (2, 1)
-    rows = env["store"].conn.execute("SELECT rule_id, symbol, date, detail->>'days' FROM meta.quality_issues "
-                                     "WHERE rule_id = 'GD001'").fetchall()
-    assert rows == [("GD001", "ZZQA", ours["date"].iloc[2], "2")] or rows[0][3] == "2"
+    assert s["issues"] == 2
+    dates = [r[0] for r in env["store"].conn.execute(
+        "SELECT date FROM meta.quality_issues WHERE rule_id = 'GD001' ORDER BY date").fetchall()]
+    ours_days = pd.to_datetime(ours["date"]).dt.date.tolist()            # ZZQA 首个交易日 01-04，从 DAYS[1] 开始
+    assert dates == [ours_days[2], ours_days[4]]
+
+
+def test_override_drop_retracts_and_restores(env, tmp_path):
+    """人工修正删掉一条拆股 → golden 里写 is_active = 0 的新版本；去掉修正后重新生效"""
+    load(env, make_batch(env, {"ZZQA": closes()}))
+    record_events(env)
+    run = lambda: gl.build_adjustments(store=env["store"], ch=env["ch"], db=DB, today=D("2026-10-13"))
+    run()
+    (tmp_path / "overrides.csv").write_text(
+        "action,symbol,kind,ex_date,value,decided_on,note\ndrop,ZZQA,split,2022-01-10,,2026-10-14,测试\n", encoding="utf-8")
+    s = run()
+    assert (s["overrides"]["dropped"], s["retracted"], s["written"]) == (1, 1, 1)
+    f = env["ch"].query_df(f"SELECT ex_date FROM {DB}.v_adjustment_factors")
+    assert pd.to_datetime(f["ex_date"]).dt.date.tolist() == [D("2022-01-12")]           # 拆股已撤回，只剩分红
+    adj = env["ch"].query_df(f"SELECT adj_close FROM {DB}.v_price_daily_adjusted WHERE date = '2022-01-07'")
+    assert adj["adj_close"][0] == pytest.approx(100 * 0.98)                              # 不再除以 2
+
+    (tmp_path / "overrides.csv").write_text("action,symbol,kind,ex_date,value,decided_on,note\n", encoding="utf-8")
+    s = run()
+    assert (s["changed"], s["retracted"]) == (1, 0)                                      # 重新生效：再写一个新版本
+    versions = env["ch"].query_df(f"SELECT version, is_active FROM {DB}.adjustment_events WHERE kind = 'split' ORDER BY version")
+    assert list(zip(versions["version"], versions["is_active"])) == [(1, 1), (2, 0), (3, 1)]
+
+
+def test_override_set_value(env, tmp_path):
+    """改值：KMI 那种分红金额被放大 10 倍的，改成正确金额"""
+    load(env, make_batch(env, {"ZZQA": closes()}))
+    record_events(env)
+    (tmp_path / "overrides.csv").write_text(
+        "action,symbol,kind,ex_date,value,decided_on,note\nset_value,ZZQA,dividend,2022-01-12,0.5,2026-10-14,测试\n",
+        encoding="utf-8")
+    s = gl.build_adjustments(store=env["store"], ch=env["ch"], db=DB, today=D("2026-10-13"))
+    assert s["overrides"]["set_value"] == 1
+    pf = env["ch"].query_df(f"SELECT price_factor FROM {DB}.adjustment_events WHERE kind = 'dividend'")["price_factor"][0]
+    assert pf == pytest.approx(1 - 0.5 / 50)
 
 
 def test_duplicate_events_from_old_and_new_symbol_counted_once(env):
@@ -131,3 +170,16 @@ def test_duplicate_events_from_old_and_new_symbol_counted_once(env):
                        "p_security_id => %s)", (run.batch_id, Jsonb({}), sid))
     s = gl.build_adjustments(store=store, ch=env["ch"], db=DB, today=D("2026-10-13"))
     assert (s["duplicates_dropped"], s["written"]) == (1, 2)
+
+
+def test_override_add_spinoff(env, tmp_path):
+    """分拆：和现金分红同一算法，value = 每股分到的价值"""
+    load(env, make_batch(env, {"ZZQA": closes()}))
+    (tmp_path / "overrides.csv").write_text(
+        "action,symbol,kind,ex_date,value,decided_on,note\nadd,ZZQA,spinoff,2022-01-12,10,2026-10-14,测试\n",
+        encoding="utf-8")
+    s = gl.build_adjustments(store=env["store"], ch=env["ch"], db=DB, today=D("2026-10-13"))
+    assert (s["overrides"]["added"], s["written"]) == (1, 1)
+    ev = env["ch"].query_df(f"SELECT kind, event_id, price_factor, volume_factor FROM {DB}.adjustment_events")
+    assert (ev["kind"][0], ev["event_id"][0]) == ("spinoff", 0)
+    assert ev["price_factor"][0] == pytest.approx(1 - 10 / 50) and ev["volume_factor"][0] == 1

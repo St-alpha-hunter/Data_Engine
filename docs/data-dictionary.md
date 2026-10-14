@@ -45,7 +45,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | A 拉取 | 调 FMP | `fetch_data/fetch.py` 的 `FetchData` | ✅ |
 | B 进 raw | 结构检查 → 写 raw | `pipelines/raw_loader.py` 的 `ingest()` | ✅ |
 | C 清洗校验 | 从 raw 按 batch_id 读 → 按规则校验 → 写 issues + quarantine（同一事务）→ 写中间态 parquet → 错误报告 → 对账 | `pipelines/clean_runner.py` 的 `run_clean(batch_id)`；清洗类按接口名自动注册（`clean/registry.py`） | ✅ |
-| D 进 golden | 中间态 parquet → golden | 待写 | ⏳ |
+| D 进 golden | 中间态 parquet → 代码对应证券编号 → 按存续期截断 → 和当前版本比对、有变化才写新版本；再由事件算复权因子、和 FMP 复权价核对 | `pipelines/golden_loader.py`（目前只有日线：不复权价 + 复权因子） | ✅ 日线 |
 
 `meta.ingestion` 只包 A + B；C、D 是否成功看 `meta.load_log`。
 
@@ -106,8 +106,34 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | `raw.analyst_grades` | 分析师评级人数（每月）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票一个月 | [ch 009](../sql/clickhouse/009_raw_analyst_grades.sql) | — |
 | `raw.profile` | 公司概况快照（没有日期，看 `ingested_at`）；FMP 原样 + 追溯字段，只追加 | 一个批次里一只股票 | [ch 010](../sql/clickhouse/010_raw_profile.sql) | — |
 | `raw.executive_compensation` | 高管薪酬；FMP 原样 + 追溯字段，只追加 | 一个批次里一份委托书的一位高管（batch × symbol × filingDate × nameAndPosition） | [ch 011](../sql/clickhouse/011_raw_executive_compensation.sql) | — |
-| `golden.price_volume_daily` | 日线清洗后数据，带版本字段 | — | 待建 | — |
-| `golden.v_price_volume_daily` | 取当前版本的视图，默认读这个 | — | 待建 | — |
+| `raw.price_volume_unadjusted_daily` | FMP **不复权**日线（字段名也叫 adjOpen / adjClose，实际是当时真实成交价），2010 年起；golden 日线的来源 | 一个批次里一只股票一天（batch × symbol × date） | [ch 012](../sql/clickhouse/012_raw_price_volume_unadjusted_daily.sql) | — |
+| `golden.price_daily` | **日线主数据：不复权价**，按证券编号存，带版本；有变化才写新版本 | 一只证券一天的一个版本（security_id × date × version） | [ch 013](../sql/clickhouse/013_golden_price_daily.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
+| `golden.adjustment_events` | 复权事件和复权因子（拆股 / 现金分红 / 分拆），带版本和撤回标记 `is_active` | 一个事件的一个版本 | [ch 014](../sql/clickhouse/014_golden_adjustment_events.sql) | [golden.adjustment_events](schemas/golden.adjustment_events.md) |
+| `golden.v_price_daily` | 视图：每只证券每天的当前版本（不复权） | 一只证券一天 | [ch 015](../sql/clickhouse/015_golden_v_price_daily.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
+| `golden.v_adjustment_factors` | 视图：每个除权日的当前因子 + 累积因子（只用有效事件） | 一只证券一个除权日 | [ch 016](../sql/clickhouse/016_golden_v_adjustment_factors.sql) | [golden.adjustment_events](schemas/golden.adjustment_events.md) |
+| `golden.v_price_daily_adjusted` | 视图：**回测用复权价** = 不复权价 × 累积因子（向最新一天对齐，和 FMP 复权价同一口径） | 一只证券一天 | [ch 017](../sql/clickhouse/017_golden_v_price_daily_adjusted.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
+
+### 人工配置文件（`config/`）
+
+人工核对的结论都放在这几个文件里，和代码一起提交 git，每一行写明原因：
+
+| 文件 | 用途 | 谁读它 |
+|---|---|---|
+| `security_overrides.csv` | 证券的代码历史以人工为准（GOOG/GOOGL、FOXA 拆成两只等） | `pipelines/security_master.py` |
+| `symbol_change_fixes.csv` | `link` 人工串联两个代码；`ignore` 忽略 FMP 的错误代码变更 | `pipelines/security_master.py` |
+| `golden_skip.csv` | 写 golden 时跳过的证券（存续期待核对：主表最后交易日是近似值，或代码被别的公司重复使用） | `pipelines/golden_loader.py` |
+| `adjustment_overrides.csv` | 复权事件的人工修正：`drop` 删除 / `set_value` 改值 / `add` 补事件（含分拆） | `pipelines/golden_loader.py` |
+
+### 常用命令
+
+```bash
+python -m pipelines.backfill --to-date 2026-10-13 --clean     # 全量补数据（断点续跑；--dry-run 看计划）
+python -m pipelines.clean_runner --reclean --all             # 规则升版本后，所有批次重新清洗
+python -m pipelines.golden_loader all                        # 不复权日线 → golden，算复权因子，和 FMP 核对
+python -m pipelines.golden_loader adjustments                # 只重算复权因子（改了 adjustment_overrides.csv 之后）
+python -m pipelines.security_maintenance --apply             # 证券主表增量维护
+python -m pipelines.event_security_backfill --apply          # 新事件回填 security_id
+```
 
 ### 表之间的关系
 

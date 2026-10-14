@@ -13,6 +13,9 @@
     S3_SECRET_KEY=...
 
 重跑同一个批次会覆盖同名文件。
+
+路径可移植：项目目录里的文件记相对路径（data/volume_data_1y/xxx.parquet），Windows 本机和 Docker 容器（Airflow）里都能读；
+以前记下的 Windows 绝对路径（E:\data_process\data\...）读取时自动换算成当前项目目录下的 data/...
 """
 import os
 from pathlib import Path
@@ -47,20 +50,44 @@ class IntermediateStore:
         return options
 
     def location(self, endpoint: str, batch_id: str) -> str:
-        if self.base_url is None:
-            folder = ENDPOINT_DATA_DIRS.get(endpoint, DATA_DIR / endpoint)
-            return str(Path(folder) / f"{batch_id}.parquet")
+        """文件地址：远程是 URL；本地在项目目录里的记相对路径（跨系统可用），其他记绝对路径"""
         if self.is_remote:
             return f"{self.base_url}/{endpoint}/{batch_id}.parquet"
-        return str(Path(self.base_url) / endpoint / f"{batch_id}.parquet")
+        if self.base_url is None:
+            path = Path(ENDPOINT_DATA_DIRS.get(endpoint, DATA_DIR / endpoint)) / f"{batch_id}.parquet"
+        else:
+            path = Path(self.base_url) / endpoint / f"{batch_id}.parquet"
+        try:
+            return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+        except ValueError:
+            return str(path)
+
+    @staticmethod
+    def resolve(location: str) -> str:
+        """记录的地址 → 当前环境下能打开的地址"""
+        if "://" in location:
+            return location
+        normalized = location.replace("\\", "/")
+        path = Path(normalized)
+        if not path.is_absolute() and not (len(normalized) > 1 and normalized[1] == ":"):
+            return str(BASE_DIR / path)
+        if path.exists():
+            return str(path)
+        # 别的系统上记下的项目内绝对路径（如 Windows 的 E:/data_process/data/...）：按 data/ 之后的部分换算
+        parts = normalized.split("/")
+        if "data" in parts:
+            return str(BASE_DIR.joinpath(*parts[parts.index("data"):]))
+        return location
 
     def write(self, df: pd.DataFrame, endpoint: str, batch_id: str) -> str:
-        """写入 parquet，返回文件地址"""
+        """写入 parquet，返回文件地址（记进 meta.load_log）"""
         loc = self.location(endpoint, batch_id)
+        target = self.resolve(loc)
         if not self.is_remote:
-            Path(loc).parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(loc, index=False, storage_options=self.storage_options)
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(target, index=False, storage_options=self.storage_options)
         return loc
 
     def read(self, location: str) -> pd.DataFrame:
-        return pd.read_parquet(location, storage_options=self.storage_options if "://" in location else None)
+        target = self.resolve(location)
+        return pd.read_parquet(target, storage_options=self.storage_options if "://" in target else None)

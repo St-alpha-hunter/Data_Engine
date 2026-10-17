@@ -357,6 +357,35 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     return stats
 
 
+def refresh_securities(*, store: MetaStore | None = None, ch: ClickHouseStore | None = None, db: str = GOLDEN_DB,
+                       raw_db: str = "raw") -> int:
+    """
+    golden.securities 整表刷新：证券主表（最后使用的代码）+ 最近一次公司概况里的行业 / 板块
+    几百行，先清空再写入（中间不到一秒是空的，看板最多看到一次空结果）
+    """
+    store, ch = store or MetaStore(), ch or ClickHouseStore()
+    sec = pd.DataFrame(store.conn.execute("""
+        SELECT s.security_id, sym.id_value, s.name, s.status, s.security_type, s.primary_exchange,
+               s.first_trade_date, s.last_trade_date
+        FROM ref.securities s
+        JOIN LATERAL (SELECT id_value FROM ref.security_identifiers i
+                      WHERE i.security_id = s.security_id AND i.id_type = 'symbol'
+                      ORDER BY valid_from DESC LIMIT 1) sym ON true""").fetchall(),
+        columns=["security_id", "symbol", "name", "status", "security_type", "primary_exchange",
+                 "first_trade_date", "last_trade_date"])
+    prof = ch.query_df(f"""SELECT symbol, argMax(sector, ingested_at) AS sector, argMax(industry, ingested_at) AS industry
+                           FROM {raw_db}.profile GROUP BY symbol""")
+    if prof.empty:
+        prof = pd.DataFrame(columns=["symbol", "sector", "industry"])
+    out = sec.merge(prof, on="symbol", how="left").astype({"security_id": "uint64"})
+    out = out.astype(object).where(out.notna(), None)
+    ch.command(f"TRUNCATE TABLE {db}.securities")
+    if len(out):
+        ch.insert_df(f"{db}.securities", out)
+    log.info(f"[golden] securities 刷新：{len(out)} 只")
+    return len(out)
+
+
 def pending_batches(store: MetaStore, db: str = GOLDEN_DB) -> list[str]:
     """已经清洗出中间态、但还没成功写进 golden 的不复权日线批次"""
     return [r[0] for r in store.conn.execute("""
@@ -372,6 +401,7 @@ def load_all(*, store: MetaStore | None = None, ch: ClickHouseStore | None = Non
              today: date | None = None) -> dict:
     """还没写进 golden 的批次 → golden；再重算复权因子、和 FMP 核对"""
     store, ch = store or MetaStore(), ch or ClickHouseStore()
+    refresh_securities(store=store, ch=ch)
     batches = pending_batches(store)
     totals = {}
     for b in batches:

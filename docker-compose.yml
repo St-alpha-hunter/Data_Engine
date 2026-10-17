@@ -98,6 +98,25 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # ===================== Superset 6.1.0（看板）=====================
+  # 镜像：docker/superset/Dockerfile（官方镜像 + PostgreSQL / ClickHouse 驱动）；元数据库：postgres 容器里的 superset 库
+  # 连数据用只读账号 superset_ro（PostgreSQL 的 meta / ref / events、airflow 运行记录；ClickHouse 的 raw / golden）
+  # 网页：http://localhost:8088，管理员 admin，密码见 .env 的 SUPERSET_ADMIN_PASSWORD
+  superset:
+    build: ./docker/superset
+    image: data-engine-superset:6.1.0
+    env_file: .env
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./docker/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - ./docker/superset/bootstrap.sh:/app/project-bootstrap.sh:ro
+    entrypoint: ["/bin/bash", "/app/project-bootstrap.sh"]
+    depends_on:
+      - postgres
+      - clickhouse
+    restart: unless-stopped
+
 volumes:
   clickhouse_data:
   postgres_data:

@@ -109,6 +109,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 | `raw.price_volume_unadjusted_daily` | FMP **不复权**日线（字段名也叫 adjOpen / adjClose，实际是当时真实成交价），2010 年起；golden 日线的来源 | 一个批次里一只股票一天（batch × symbol × date） | [ch 012](../sql/clickhouse/012_raw_price_volume_unadjusted_daily.sql) | — |
 | `golden.price_daily` | **日线主数据：不复权价**，按证券编号存，带版本；有变化才写新版本 | 一只证券一天的一个版本（security_id × date × version） | [ch 013](../sql/clickhouse/013_golden_price_daily.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
 | `golden.adjustment_events` | 复权事件和复权因子（拆股 / 现金分红 / 分拆），带版本和撤回标记 `is_active` | 一个事件的一个版本 | [ch 014](../sql/clickhouse/014_golden_adjustment_events.sql) | [golden.adjustment_events](schemas/golden.adjustment_events.md) |
+| `golden.securities` | 证券基本信息（代码、名称、状态、行业），看板和查询里把 security_id 换成代码 / 名称用；每次写 golden 时从证券主表整表刷新 | 一只证券 | [ch 018](../sql/clickhouse/018_golden_securities.sql) | — |
 | `golden.v_price_daily` | 视图：每只证券每天的当前版本（不复权） | 一只证券一天 | [ch 015](../sql/clickhouse/015_golden_v_price_daily.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
 | `golden.v_adjustment_factors` | 视图：每个除权日的当前因子 + 累积因子（只用有效事件） | 一只证券一个除权日 | [ch 016](../sql/clickhouse/016_golden_v_adjustment_factors.sql) | [golden.adjustment_events](schemas/golden.adjustment_events.md) |
 | `golden.v_price_daily_adjusted` | 视图：**回测用复权价** = 不复权价 × 累积因子（向最新一天对齐，和 FMP 复权价同一口径） | 一只证券一天 | [ch 017](../sql/clickhouse/017_golden_v_price_daily_adjusted.sql) | [golden.price_daily](schemas/golden.price_daily.md) |
@@ -126,7 +127,7 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 
 ### 常用命令
 
-日常由 Airflow 自动调度（每日 / 每周 / 每月三个流程），部署和用法见 [airflow.md](airflow.md)。下面是不经过 Airflow 手动执行的命令：
+日常由 Airflow 自动调度（每日 / 每周 / 每月三个流程），部署和用法见 [airflow.md](airflow.md)。看板（Superset）见 [superset.md](superset.md)。下面是不经过 Airflow 手动执行的命令：
 
 ```bash
 python -m pipelines.daily --date 2026-10-13                  # 每日流程的某一天（事件 → 主表 → 日线 → golden）

@@ -193,3 +193,16 @@ def test_pending_batches_only_unloaded(env):
     assert gl.pending_batches(env["store"], db=DB) == []
     b2 = make_batch(env, {"ZZQA": closes()})
     assert gl.pending_batches(env["store"], db=DB) == [b2]
+
+
+def test_refresh_securities(env):
+    """证券基本信息整表刷新：代码取最后使用的；行业来自最近一次公司概况；重复刷新不会重复"""
+    env["ch"].insert_df("raw_test.profile", pd.DataFrame([
+        {"symbol": "ZZQA", "sector": "Tech", "industry": "Old", "extra": "{}", "batch_id": "p1"}]))
+    env["ch"].insert_df("raw_test.profile", pd.DataFrame([
+        {"symbol": "ZZQA", "sector": "Tech", "industry": "Software", "extra": "{}", "batch_id": "p2"}]))
+    for _ in range(2):
+        assert gl.refresh_securities(store=env["store"], ch=env["ch"], db=DB, raw_db="raw_test") == 2
+    rows = env["ch"].query_df(f"SELECT symbol, status, sector, industry FROM {DB}.securities ORDER BY symbol")
+    rows = rows.astype(object).where(rows.notna(), None)
+    assert rows.values.tolist() == [["ZZQA", "active", "Tech", "Software"], ["ZZQB", "active", None, None]]

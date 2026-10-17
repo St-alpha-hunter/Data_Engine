@@ -183,3 +183,13 @@ def test_override_add_spinoff(env, tmp_path):
     ev = env["ch"].query_df(f"SELECT kind, event_id, price_factor, volume_factor FROM {DB}.adjustment_events")
     assert (ev["kind"][0], ev["event_id"][0]) == ("spinoff", 0)
     assert ev["price_factor"][0] == pytest.approx(1 - 10 / 50) and ev["volume_factor"][0] == 1
+
+
+def test_pending_batches_only_unloaded(env):
+    """每日流程只处理还没写进 golden 的批次"""
+    b1 = make_batch(env, {"ZZQA": closes()})
+    assert gl.pending_batches(env["store"], db=DB) == [b1]
+    load(env, b1)
+    assert gl.pending_batches(env["store"], db=DB) == []
+    b2 = make_batch(env, {"ZZQA": closes()})
+    assert gl.pending_batches(env["store"], db=DB) == [b2]

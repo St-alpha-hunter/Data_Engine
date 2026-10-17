@@ -15,6 +15,9 @@ FREQUENCIES = {"Weekly", "Bi-Weekly", "Monthly", "Quarterly", "Semi-Annual", "An
 SPECIAL_FREQUENCIES = {"Special", "Irregular"}
 
 
+VOLATILE_FIELDS = {"yield"}          # 随行情变化、不属于这笔分红本身的字段
+
+
 def normalize_dividends(rows: list[dict], source: str = "fmp", today: date | None = None) -> NormalizeResult:
     result = NormalizeResult(EVENT_TYPE)
     seen = set()
@@ -56,6 +59,7 @@ def normalize_dividends(rows: list[dict], source: str = "fmp", today: date | Non
             "status": status_for(ex_date, today),
             "source": source,
             "source_event_key": key,
-            "payload": payload_of(row),
+            # yield（股息率）不算进内容：FMP 按当前股价算，每天都变，算进去每拉一次就多一个假修订（实测每日 47 条）
+            "payload": payload_of({k: v for k, v in row.items() if k not in VOLATILE_FIELDS}),
         })
     return result

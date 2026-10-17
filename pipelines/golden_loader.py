@@ -17,7 +17,7 @@ D：中间态 → golden（目前只有日线：不复权价 + 复权因子）
          按收益率比：漏一个事件只影响事件那一天的收益率；按价格水平比会让之前几千天都算偏差
 
 命令行：
-    python -m pipelines.golden_loader all            # 所有不复权日线批次 → golden，再算复权因子、核对
+    python -m pipelines.golden_loader all            # 还没写进 golden 的不复权日线批次 → golden，再算复权因子、核对
     python -m pipelines.golden_loader prices <batch_id>
     python -m pipelines.golden_loader adjustments
     python -m pipelines.golden_loader check
@@ -26,6 +26,7 @@ import argparse
 import csv
 import logging
 import os
+import re
 from datetime import date
 
 import numpy as np
@@ -62,13 +63,29 @@ def load_skip(path=None) -> dict[str, str]:
         return {r["symbol"].strip().upper(): r["reason"] for r in csv.DictReader(f)}
 
 
+def read_config_csv(path) -> list[dict]:
+    """
+    读人工配置 CSV（UTF-8，可带 BOM）。读不了时给出能看懂的原因：
+    最常见的是在 Excel 里打开后直接保存——Excel 会按 GBK 读、存回去时中文变成 ?，日期改成 28/04/2011
+    """
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{path} 不是 UTF-8 编码（{e.reason}）：可能在 Excel 里打开后被保存过。"
+                         f"请用 git 或备份恢复；以后用 VS Code 编辑，或在 Excel 里另存为「CSV UTF-8」") from None
+    bad_dates = [r for r in rows if r.get("ex_date") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["ex_date"].strip())]
+    if bad_dates:
+        raise ValueError(f"{path} 有日期不是 YYYY-MM-DD 格式（如 {bad_dates[0]['ex_date']}）：可能被 Excel 改过格式")
+    return rows
+
+
 def load_overrides(path=None) -> list[dict]:
     """人工修正：action = drop（删除事件）/ set_value（改金额或比例）/ add（补事件）"""
     path = path or OVERRIDES_PATH
     if not os.path.exists(path):
         return []
-    with open(path, encoding="utf-8-sig") as f:      # 兼容带 BOM（Excel 打开不乱码）
-        rows = list(csv.DictReader(f))
+    rows = read_config_csv(path)
     for r in rows:
         if r["action"] not in ("drop", "set_value", "add") or r["kind"] not in ("split", "dividend", "spinoff"):
             raise ValueError(f"adjustment_overrides.csv 有无法识别的行：{r}")
@@ -117,7 +134,8 @@ def _changed(new: pd.DataFrame, cur: pd.DataFrame) -> pd.Series:
 # 1. 日线
 # =========================
 def load_prices(batch_id: str, *, store: MetaStore | None = None, ch: ClickHouseStore | None = None,
-                intermediate: IntermediateStore | None = None, db: str = GOLDEN_DB) -> dict:
+                intermediate: IntermediateStore | None = None, db: str = GOLDEN_DB, today: date | None = None) -> dict:
+    """today：代码 → 证券对应用哪一天的代码表（每日流程传交易日；不传用今天）"""
     store, ch, intermediate = store or MetaStore(), ch or ClickHouseStore(), intermediate or IntermediateStore()
     ing = store.get_ingestion(batch_id)
     if ing is None or ing["endpoint"] != PRICE_ENDPOINT:
@@ -137,7 +155,7 @@ def load_prices(batch_id: str, *, store: MetaStore | None = None, ch: ClickHouse
     stats = {"rows_in": len(df)}
 
     # 代码 → 证券；跳过名单
-    universe = build_universe(store.conn)
+    universe = build_universe(store.conn, today=today)
     skip = load_skip()
     df["security_id"] = df["symbol"].map(universe.security_of)
     stats["unmapped"] = int(df["security_id"].isna().sum())
@@ -310,7 +328,8 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     if ours.empty:
         return {"compared": 0, "issues": 0}
     fmp = ch.query_df(f"""
-        SELECT symbol AS source_symbol, date, argMax(adjClose, ingested_at) AS fmp_adj_close
+        SELECT symbol AS source_symbol, date, argMax(adjClose, ingested_at) AS fmp_adj_close,
+               argMax(batch_id, ingested_at) AS fmp_batch
         FROM {raw_table} WHERE symbol IN {{syms:Array(String)}} AND adjClose > 0 GROUP BY symbol, date""",
         {"syms": sorted(ours["source_symbol"].unique().tolist())})
     d = ours.merge(fmp, on=["source_symbol", "date"], how="inner").sort_values(["security_id", "date"])
@@ -319,6 +338,9 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     g = d.groupby("security_id")
     d["r_ours"] = g["adj_close"].pct_change()
     d["r_fmp"] = g["fmp_adj_close"].pct_change()
+    # FMP 复权价每次分红都会改写整段历史：相邻两天来自不同的拉取批次时口径可能不同，不比
+    #（每日增量只拉最近几天，跨批次的那一天会出现假偏差）
+    d.loc[g["fmp_batch"].shift() != d["fmp_batch"], "r_fmp"] = np.nan
     d["r_unadj"] = g["close"].pct_change()
     d = d.dropna(subset=["r_ours", "r_fmp"]).copy()
     d["diff"] = d["r_ours"] - d["r_fmp"]
@@ -335,18 +357,29 @@ def check_against_fmp(*, store: MetaStore | None = None, ch: ClickHouseStore | N
     return stats
 
 
-def load_all(*, store: MetaStore | None = None, ch: ClickHouseStore | None = None) -> dict:
-    store, ch = store or MetaStore(), ch or ClickHouseStore()
-    batches = [r[0] for r in store.conn.execute("""
+def pending_batches(store: MetaStore, db: str = GOLDEN_DB) -> list[str]:
+    """已经清洗出中间态、但还没成功写进 golden 的不复权日线批次"""
+    return [r[0] for r in store.conn.execute("""
         SELECT DISTINCT i.batch_id FROM meta.ingestion i
         JOIN meta.load_log l ON l.batch_id = i.batch_id AND l.layer = 'intermediate' AND l.status = 'success'
-        WHERE i.endpoint = %s ORDER BY 1""", (PRICE_ENDPOINT,)).fetchall()]
+        WHERE i.endpoint = %s
+          AND NOT EXISTS (SELECT 1 FROM meta.load_log g WHERE g.batch_id = i.batch_id AND g.layer = 'golden'
+                          AND g.status = 'success' AND g.target_table = %s)
+        ORDER BY 1""", (PRICE_ENDPOINT, f"{db}.price_daily")).fetchall()]
+
+
+def load_all(*, store: MetaStore | None = None, ch: ClickHouseStore | None = None,
+             today: date | None = None) -> dict:
+    """还没写进 golden 的批次 → golden；再重算复权因子、和 FMP 核对"""
+    store, ch = store or MetaStore(), ch or ClickHouseStore()
+    batches = pending_batches(store)
     totals = {}
     for b in batches:
-        for k, v in load_prices(b, store=store, ch=ch).items():
+        for k, v in load_prices(b, store=store, ch=ch, today=today).items():
             totals[k] = totals.get(k, 0) + v
     return {"batches": len(batches), "prices": totals,
-            "adjustments": build_adjustments(store=store, ch=ch), "check": check_against_fmp(store=store, ch=ch)}
+            "adjustments": build_adjustments(store=store, ch=ch, today=today),
+            "check": check_against_fmp(store=store, ch=ch)}
 
 
 def main():

@@ -29,7 +29,7 @@ import io
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import requests
@@ -150,6 +150,44 @@ def load_splits(symbols: list[str], chunk_size: int = DEFAULT_CHUNK_SIZE, *, met
     event_store = event_store or EventStore(meta.conn, meta)
     return _load_chunked(meta, event_store, "splits", "split", normalize_splits,
                          list(symbols), chunk_size, fetcher_cls)
+
+
+def _load_calendar(meta, event_store, endpoint, event_type, normalize, start: date, end: date,
+                   fetcher_cls) -> EventLoadResult:
+    """
+    按日历拉全市场事件（每日增量用）：一天一个请求（日历接口单次最多 4000 条，一次只查一天最稳）
+    和按股票拉的历史返回完全一样的内容（实测 JPM 2026-10-06 分红逐字段相同），所以不会产生重复事件
+    """
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    rows, fetch_totals, failed_all = [], Counter(), []
+    with meta.ingestion_run(endpoint, [d.isoformat() for d in days],
+                            {"from_date": start.isoformat(), "to_date": end.isoformat()}) as run:
+        for d in days:
+            with fetcher_cls([d.isoformat()], endpoint, {"from_date": d, "to_date": d}) as fetcher:
+                df, summary, succeed, failed = fetcher.fetch_fmp_batch()
+            if not df.empty:
+                rows += df.drop(columns=["endpoint"], errors="ignore").to_dict(orient="records")
+            fetch_totals.update({k: summary.get(k, 0) for k in ("success", "missing", "failed")})
+            failed_all += failed
+        run.finish(dict(fetch_totals), failed_all, rows_fetched=len(rows))
+    return _write(event_type, normalize(rows), run.batch_id, len(rows), event_store)
+
+
+def load_dividends_calendar(start: date, end: date, *, meta=None, event_store=None,
+                            fetcher_cls=FetchData) -> EventLoadResult:
+    """全市场分红日历 [start, end]（按除息日）"""
+    meta = meta or MetaStore()
+    event_store = event_store or EventStore(meta.conn, meta)
+    return _load_calendar(meta, event_store, "dividends_calendar", "dividend", normalize_dividends,
+                          start, end, fetcher_cls)
+
+
+def load_splits_calendar(start: date, end: date, *, meta=None, event_store=None,
+                         fetcher_cls=FetchData) -> EventLoadResult:
+    """全市场拆股日历 [start, end]"""
+    meta = meta or MetaStore()
+    event_store = event_store or EventStore(meta.conn, meta)
+    return _load_calendar(meta, event_store, "splits_calendar", "split", normalize_splits, start, end, fetcher_cls)
 
 
 def sp500_universe(since: date = UNIVERSE_START, url: str = SP500_START_END_URL) -> list[str]:

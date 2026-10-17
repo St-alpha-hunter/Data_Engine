@@ -63,7 +63,7 @@ def test_dividend_basic():
     assert (e["symbol"], e["ex_date"], e["amount"], e["dividend_type"], e["currency"], e["status"]) == \
            ("AAPL", date(2026, 8, 10), Decimal("0.27"), "regular", "USD", "confirmed")
     assert e["source_event_key"] == "AAPL|2026-08-10|dividend"
-    assert e["payload"]["yield"] == 0.34                         # yield 不进明细，但保存在原始内容里
+    assert "yield" not in e["payload"]                             # yield 按当前股价算、每天都变：不保存（否则产生假修订）
     assert "yield" not in e
 
 
@@ -194,3 +194,21 @@ def test_payload_is_json_serializable():
               normalize_sp500_index_changes([{"ticker": "META", "start_date": "2022-06-09", "end_date": float("nan")}])]:
         for e in r.events:
             json.dumps(e["payload"])
+
+
+def test_dividend_payload_excludes_yield():
+    """股息率按当前股价算、每天都变：不算进内容，否则每拉一次就多一个假修订"""
+    row = {"symbol": "JPM", "date": "2026-10-06", "dividend": 1.65, "adjDividend": 1.65, "frequency": "Quarterly"}
+    a = normalize_dividends([{**row, "yield": 1.8566}]).events[0]["payload"]
+    b = normalize_dividends([{**row, "yield": 1.8564}]).events[0]["payload"]
+    assert a == b and "yield" not in a
+
+
+def test_acquisition_payload_order_is_deterministic():
+    """同一份文件按不同股票类别各给一行（日期、受理时间相同）：输入顺序不同，合并后的内容也要一样"""
+    base = {"targetedSymbol": "TGT", "targetedCik": "0000000001", "cik": "0000000002", "transactionDate": "2026-10-01",
+            "acceptedDate": "2026-10-01 16:00:00", "link": "https://sec/x", "companyName": "Acq"}
+    rows = [{**base, "symbol": "ACQ"}, {**base, "symbol": "ACQ.B"}]
+    p1 = normalize_acquisitions(rows).events[0]["payload"]
+    p2 = normalize_acquisitions(rows[::-1]).events[0]["payload"]
+    assert p1 == p2

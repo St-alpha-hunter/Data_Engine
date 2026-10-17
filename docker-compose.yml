@@ -67,7 +67,9 @@ services:
     depends_on:
       - postgres
       - clickhouse
-    command: db migrate                    # 只做元数据库初始化 / 升级，跑完就退出
+    # 初始化 / 升级元数据库，并确保资源池 fmp 存在（1 个位置：同一时间只允许一个任务请求 FMP，避免触发限流）；跑完就退出
+    entrypoint: /bin/bash
+    command: ["-c", "airflow db migrate && airflow pools set fmp 1 'FMP API：同一时间只允许一个任务请求'"]
     restart: "no"
 
   airflow-apiserver:

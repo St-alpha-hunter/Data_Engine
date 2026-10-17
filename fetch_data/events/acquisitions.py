@@ -16,6 +16,7 @@ FMP 的原始数据有大量重复，先按交易合并：
 被收购方没有代码（私有公司）的交易 → skipped（private_target）
 完成日（completion_date）这里不填：要用被收购方的最后交易日推断，在写库阶段处理
 """
+import json
 from collections import defaultdict
 from datetime import date
 from zoneinfo import ZoneInfo
@@ -62,7 +63,11 @@ def normalize_acquisitions(rows: list[dict], source: str = "fmp") -> NormalizeRe
         deals[deal_key].append(row)
 
     for deal_key, group in deals.items():
-        group = sorted(group, key=lambda r: (to_date(r.get("transactionDate")), str(r.get("acceptedDate") or "")))
+        # 排序要完全确定：同一份文件 FMP 可能按不同股票类别各给一行（日期、受理时间都相同），
+        # 返回顺序每次不一样，不排到底的话合并后的 payload 会变，产生假修订（实测每日运行 34 条）
+        group = sorted(group, key=lambda r: (to_date(r.get("transactionDate")), str(r.get("acceptedDate") or ""),
+                                             str(r.get("link") or ""), str(r.get("symbol") or ""),
+                                             str(r.get("targetedSymbol") or ""), json.dumps(r, sort_keys=True, default=str)))
         first = group[0]
         target_symbol = pick_common_symbol(to_symbol(r.get("targetedSymbol")) for r in group)
         acquirer_symbol = pick_common_symbol(to_symbol(r.get("symbol")) for r in group)

@@ -126,7 +126,10 @@ raw 写入前只做**结构检查**（必需字段存在、类型可转换、`sy
 
 ### 常用命令
 
+日常由 Airflow 自动调度（每日 / 每周 / 每月三个流程），部署和用法见 [airflow.md](airflow.md)。下面是不经过 Airflow 手动执行的命令：
+
 ```bash
+python -m pipelines.daily --date 2026-10-13                  # 每日流程的某一天（事件 → 主表 → 日线 → golden）
 python -m pipelines.backfill --to-date 2026-10-13 --clean     # 全量补数据（断点续跑；--dry-run 看计划）
 python -m pipelines.clean_runner --reclean --all             # 规则升版本后，所有批次重新清洗
 python -m pipelines.golden_loader all                        # 不复权日线 → golden，算复权因子，和 FMP 核对

@@ -28,7 +28,8 @@ def _alert_on_failure(context):
     start_date=pendulum.datetime(2026, 10, 17, tz="Asia/Shanghai"),
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=10), "execution_timeout": timedelta(hours=2),
+    default_args={"retries": 4, "retry_delay": timedelta(minutes=10),
+                  "retry_exponential_backoff": True, "max_retry_delay": timedelta(hours=1), "execution_timeout": timedelta(hours=2),
                   "on_failure_callback": _alert_on_failure},
     params={"run_date": Param(None, type=["null", "string"], description="手动指定运行日期（YYYY-MM-DD）")},
     tags=["weekly"],
@@ -54,8 +55,9 @@ def weekly_fundamentals():
     def summarize_and_alert(d: str) -> dict:
         from pipelines.alerts import check
         from pipelines.daily import summarize
+        from pipelines.periodic import WEEKLY_ENDPOINTS
         ctx = get_current_context()
-        summary = summarize(date.fromisoformat(d), ctx["dag_run"].start_date)
+        summary = summarize(date.fromisoformat(d), ctx["dag_run"].start_date, endpoints=WEEKLY_ENDPOINTS)
         alerts = check("weekly_fundamentals", ctx["run_id"], summary)
         if any(a["level"] == "error" for a in alerts):
             raise RuntimeError("; ".join(a["message"] for a in alerts if a["level"] == "error"))

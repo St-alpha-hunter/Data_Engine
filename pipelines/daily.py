@@ -63,7 +63,7 @@ def trade_date_for(logical: datetime, conn) -> date | None:
 # =========================
 def load_events(trade_date: date, *, store: MetaStore | None = None) -> dict:
     store = store or MetaStore()
-    out = {}
+    out, failed = {}, []
     for name, fn in [
         ("symbol_change", lambda: event_loader.load_symbol_changes(meta=store)),
         ("sp500", lambda: event_loader.load_sp500_index_changes(meta=store)),
@@ -73,9 +73,19 @@ def load_events(trade_date: date, *, store: MetaStore | None = None) -> dict:
         ("splits_calendar", lambda: event_loader.load_splits_calendar(
             trade_date - timedelta(days=CALENDAR_BACK), trade_date + timedelta(days=CALENDAR_AHEAD), meta=store)),
     ]:
-        r = fn()
+        # 每个来源单独试：一个失败（如 GitHub 连不上）不影响其他来源；全部试完再统一报错，让 Airflow 重试
+        try:
+            r = fn()
+        except Exception as e:
+            failed.append(f"{name}（{type(e).__name__}: {str(e)[:120]}）")
+            continue
         out[name] = {"batch_id": r.batch_id, "rows": r.rows_fetched, **r.write}
+        status = store.conn.execute("SELECT status FROM meta.ingestion WHERE batch_id = %s", (r.batch_id,)).fetchone()[0]
+        if status == "failed":                       # FMP 整批拉取失败时不抛异常，只是 0 行
+            failed.append(f"{name}（批次 {r.batch_id} 拉取失败）")
         log.info(f"[daily] 事件 {name}：{out[name]}")
+    if failed:
+        raise RuntimeError(f"[daily] 事件来源失败，重试会再试一次（已成功的会判为重复）：{failed}")
     return out
 
 
@@ -135,9 +145,12 @@ def ingest_prices(trade_date: date, *, store: MetaStore | None = None, ch: Click
     for name, ep in PRICE_JOBS.items():
         r = run_job(name, ep, params, symbols, store=store, ch=ch, clean=True)
         out[name] = {"todo": r.todo, "batches": r.batches, "failed_batches": len(r.failed_batches),
-                     "clean_errors": r.clean_errors}
+                     "clean_errors": r.clean_errors, "transient_failures": len(r.transient_failures)}
         if r.failed_batches or r.clean_errors:
             raise RuntimeError(f"[daily] {name} 有批次失败：结构检查 {r.failed_batches}，清洗 {r.clean_errors}")
+        if r.transient_failures:                       # 让 Airflow 重试：断点续跑只补拉这些股票
+            raise RuntimeError(f"[daily] {name} 有 {len(r.transient_failures)} 只股票暂时性拉取失败（网络 / 限流），"
+                               f"重试时只补拉这些：{r.transient_failures[:10]}")
     log.info(f"[daily] 日线：{out}")
     return out
 
@@ -154,15 +167,26 @@ def load_golden(trade_date: date, *, store: MetaStore | None = None, ch: ClickHo
 # =========================
 # 6. 汇总
 # =========================
-def summarize(trade_date: date, since: datetime, *, store: MetaStore | None = None) -> dict:
-    """since 之后（这次运行开始以来）的批次、问题、隔离；新增事件修订数用来监控 FMP 字段是否每天在变"""
+# 各流程用到的接口：汇总只统计自己流程的批次（几个流程同时运行时不会把别人的失败算到自己头上）
+DAILY_ENDPOINTS = ["price_volume", "price_volume_unadjusted", "symbol_change", "sp500_github", "mergers_acquisitions",
+                   "dividends_calendar", "splits_calendar", "dividends", "splits", "profile"]
+
+
+def summarize(trade_date: date, since: datetime, *, store: MetaStore | None = None,
+              endpoints: list[str] | None = None) -> dict:
+    """
+    since 之后（这次运行开始以来）、属于 endpoints 这些接口的批次、问题；隔离区和核对问题是全局的当前数
+    新增事件修订数用来监控 FMP 字段是否每天在变
+    """
     store = store or MetaStore()
+    endpoints = endpoints or DAILY_ENDPOINTS
     q = lambda sql, *a: store.conn.execute(sql, a).fetchall()
     out = {
         "trade_date": str(trade_date),
-        "batches": dict(q("SELECT status, count(*) FROM meta.ingestion WHERE started_at >= %s GROUP BY 1", since)),
+        "batches": dict(q("""SELECT status, count(*) FROM meta.ingestion
+                             WHERE started_at >= %s AND endpoint = ANY(%s) GROUP BY 1""", since, endpoints)),
         "issues": dict(q("""SELECT q.severity, count(*) FROM meta.quality_issues q JOIN meta.ingestion i USING (batch_id)
-                            WHERE i.started_at >= %s GROUP BY 1""", since)),
+                            WHERE i.started_at >= %s AND i.endpoint = ANY(%s) GROUP BY 1""", since, endpoints)),
         "gd001_total": q("SELECT count(*) FROM meta.quality_issues WHERE rule_id = 'GD001'")[0][0],
         "quarantine_pending": q("SELECT count(*) FROM meta.quarantine_records WHERE status = 'pending'")[0][0],
         "event_revisions": q("SELECT count(*) FROM events.corporate_events WHERE revision > 1 AND known_at >= %s",

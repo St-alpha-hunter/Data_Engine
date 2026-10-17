@@ -42,14 +42,22 @@ WEEKLY_JOBS = {
 }
 
 
+WEEKLY_ENDPOINTS = sorted({ep for ep, _ in WEEKLY_JOBS.values()})
+MONTHLY_ENDPOINTS = ["profile", "holidays_by_exchange"]
+
+
 def _ingest(name: str, endpoint: str, params: dict, run_date: date, store: MetaStore, ch: ClickHouseStore) -> dict:
     symbols = daily_symbols(store.conn, run_date)
     r = run_job(name, endpoint, params, symbols, store=store, ch=ch, clean=True)
     out = {"symbols": len(symbols), "todo": r.todo, "batches": len(r.batches),
-           "failed_batches": len(r.failed_batches), "clean_errors": r.clean_errors}
+           "failed_batches": len(r.failed_batches), "clean_errors": r.clean_errors,
+           "transient_failures": len(r.transient_failures)}
     log.info(f"[periodic] {name}：{out}")
     if r.failed_batches or r.clean_errors:
         raise RuntimeError(f"[periodic] {name} 有批次失败：结构检查 {r.failed_batches}，清洗 {r.clean_errors}")
+    if r.transient_failures:                           # 让 Airflow 重试：断点续跑只补拉这些股票
+        raise RuntimeError(f"[periodic] {name} 有 {len(r.transient_failures)} 只股票暂时性拉取失败（网络 / 限流），"
+                           f"重试时只补拉这些：{r.transient_failures[:10]}")
     return out
 
 

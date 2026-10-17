@@ -34,3 +34,5 @@ data/image_cache/
 # Airflow 任务日志
 data/airflow/
 
+
+*.jsonl

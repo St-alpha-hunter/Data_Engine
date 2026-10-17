@@ -14,7 +14,11 @@
 | load_golden | 新批次 → golden；重算复权因子；和 FMP 核对 |
 | summarize_and_alert | 当天的批次、问题、隔离统计；有问题就提醒（见 `pipelines/alerts.py`） |
 
-**每一步都可以重跑**（幂等）：任务失败自动重试 2 次；补跑过去某一天和当天跑的结果一样。
+事件（load_events → maintain_securities → backfill_security_id）和日线（ingest_prices）两条线**并行**，一条失败不挡另一条；
+load_golden 和汇总在两条线都结束后运行（不管成败）。
+
+**每一步都可以重跑**（幂等）：失败自动重试 4 次，间隔逐次翻倍（10、20、40、60 分钟，能扛过两个多小时的断网）；
+拉取时个别股票因网络 / 限流失败也会让任务失败、触发重试，断点续跑只补拉失败的；补跑过去某一天和当天跑的结果一样。
 手动指定日期：触发时传 `{"trade_date": "2026-10-13"}`。
 请求 FMP 的步骤共用资源池 `fmp`（1 个位置），不会同时打 FMP。
 """
@@ -42,7 +46,8 @@ def _trade_date(value: str) -> date:
     start_date=pendulum.datetime(2026, 10, 13, tz="Asia/Shanghai"),
     catchup=False,                     # 不自动补历史；需要补哪几天用 airflow backfill 指定
     max_active_runs=1,                 # 同一时间只跑一天，补跑时按日期顺序一天一天来
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=10), "execution_timeout": timedelta(hours=2),
+    default_args={"retries": 4, "retry_delay": timedelta(minutes=10),
+                  "retry_exponential_backoff": True, "max_retry_delay": timedelta(hours=1), "execution_timeout": timedelta(hours=2),
                   "on_failure_callback": _alert_on_failure},
     params={"trade_date": Param(None, type=["null", "string"], description="手动指定美股交易日（YYYY-MM-DD）；不填按执行时间换算")},
     tags=["daily"],
@@ -82,13 +87,14 @@ def daily_eod():
         from pipelines.daily import ingest_prices as run
         return run(_trade_date(d))
 
-    @task
+    # all_done：事件那条线失败也照样写 golden（用前一天的事件算复权因子；事件补上后下次会重算）
+    @task(trigger_rule="all_done")
     def load_golden(d: str) -> dict:
         from pipelines.daily import load_golden as run
         out = run(_trade_date(d))
         return {"batches": out["batches"], "check": out["check"]}       # XCom 只放小的汇总
 
-    @task(retries=0)
+    @task(retries=0, trigger_rule="all_done")
     def summarize_and_alert(d: str) -> dict:
         """汇总 + 提醒：有批次失败 → 任务标红；其他问题只记录（data/alerts/alerts.jsonl）"""
         from pipelines.alerts import check
@@ -100,13 +106,16 @@ def daily_eod():
             raise RuntimeError("; ".join(a["message"] for a in alerts if a["level"] == "error"))
         return {"summary": summary, "alerts": alerts}
 
+    # 两条线并行：事件 → 证券主表 → 回填 security_id；日线。一条线失败不挡另一条（之前事件来源连不上，日线也没拉）
+    # 两条线都请求 FMP，资源池保证同一时间只有一个在请求
     d = trade_date()
     events = load_events(d)
     securities = maintain_securities(d)
     ids = backfill_security_id(d)
     prices = ingest_prices(d)
     golden = load_golden(d)
-    events >> securities >> ids >> prices >> golden >> summarize_and_alert(d)
+    events >> securities >> ids
+    [ids, prices] >> golden >> summarize_and_alert(d)
 
 
 daily_eod()

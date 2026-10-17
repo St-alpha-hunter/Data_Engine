@@ -71,7 +71,10 @@ docker compose exec airflow-scheduler airflow dags test healthcheck
 ### 幂等与重试
 每个任务都可以安全地重跑：日期确定；拉取按（接口, 参数）断点续跑，已完成的股票跳过；事件按（来源, 事件键, 内容哈希）去重；
 清洗按批次在一个事务里整体替换；golden 先比对、有变化才写新版本。所以：
-- 任务失败**自动重试 2 次**（间隔 10 分钟）；重试只会补做没完成的部分
+- 任务失败**自动重试 4 次**，间隔逐次翻倍（10、20、40、60 分钟，`retry_exponential_backoff`），能扛过两个多小时的断网；重试只会补做没完成的部分
+- 拉取时个别股票因网络 / 限流 / 服务端错误失败（`timeout` 等暂时性错误），任务也会失败、触发重试，断点续跑只补拉这些股票
+- 每日流程分两条线并行：事件（load_events → maintain_securities → backfill_security_id）和日线（ingest_prices）；一条失败不挡另一条，load_golden 和汇总等两条线都结束再跑（`all_done`）。事件来源也逐个试，一个连不上不影响其他
+- 汇总只统计本流程的接口（`DAILY_ENDPOINTS` / `WEEKLY_ENDPOINTS` / `MONTHLY_ENDPOINTS`），别的流程的失败批次不会把它标红
 - `max_active_runs=1`：同一个 DAG 同一时间只跑一次，补跑时按日期顺序一天一天来
 - 每周 / 每月的参数里带 `as_of`（运行日期）：只用来区分"哪一次拉取"，不出现在请求里——不加的话第二周会被当成"已经拉过"全部跳过
 - 每周流程里各数据集互不依赖：一个失败不影响后面的（`trigger_rule=all_done`）
@@ -132,5 +135,6 @@ python -m pipelines.daily --date 2026-10-13 --steps load_golden      # 只跑某
 | 早上 8 点的任务没跑 | 电脑在睡眠，调度器也停了 | 醒来后会补跑最近一次错过的；同上，关闭睡眠 |
 | 手动触发的运行一直 queued | `max_active_runs=1`，前面还有一次在跑（比如取消暂停时自动补的那次） | 正常，等前一次跑完 |
 | 取消暂停后马上自动跑了一次 | 即使 `catchup=False`，也会补跑最近一个错过的时间点 | 正常 |
+| 2026-10-17 三个流程都失败 | 电脑醒得晚，几个流程同时开跑时正赶上断网（约 1 小时）：重试 2 次很快用完；断点续跑碰到空结果崩溃；拉取失败的股票没让任务失败；事件失败挡住了日线；月度汇总把每周的失败批次也算了进去 | 全部修复（见上面"幂等与重试"）；断网恢复后 `airflow tasks clear <dag> -s <日期> -e <次日> --only-failed --downstream --yes` 重跑失败的任务 |
 | 拉镜像 502 / 连接中断 | 镜像站问题 | `python tools/pull_image_via_proxy.py <镜像>`（经本机代理直连 Docker Hub） |
 | 配置 CSV 读不了（不是 UTF-8） | 在 Excel 里打开后被保存过（按 GBK 读、存回去中文变 `?`、日期变 `28/04/2011`） | 程序会直接报出原因；用 VS Code 编辑，或 Excel 里另存为「CSV UTF-8」 |

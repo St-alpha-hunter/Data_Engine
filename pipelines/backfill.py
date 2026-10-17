@@ -121,7 +121,8 @@ def done_symbols(store: MetaStore, ch: ClickHouseStore, endpoint: str, params: d
     table = FMP_ENDPOINTS[endpoint]["raw_table"]
     written = ch.query_df(f"SELECT DISTINCT symbol FROM {table} WHERE batch_id IN {{ids:Array(String)}}",
                           {"ids": [b for b, _ in rows]})
-    return done | set(written["symbol"])
+    # 这些批次一行都没写进 raw 时（如整批拉取失败），ClickHouse 返回的空结果不带列名
+    return done | (set(written["symbol"]) if "symbol" in written.columns else set())
 
 
 # =========================
@@ -135,6 +136,18 @@ class JobResult:
     failed_batches: list[str] = field(default_factory=list)
     cleaned: int = 0
     clean_errors: list[str] = field(default_factory=list)
+    transient_failures: list[str] = field(default_factory=list)   # 暂时性失败（超时、限流、服务器错误）的股票
+
+
+# 暂时性的拉取失败：重试有意义（402 套餐限制、参数错误这类重试也没用，不算）
+TRANSIENT_ERRORS = ("timeout", "request_error", "rate_limited", "server_error")
+
+
+def transient_failures(store: MetaStore, batch_id: str) -> list[str]:
+    """一个批次里暂时性失败的股票（重跑时断点续跑会只补拉这些）"""
+    return [r[0] for r in store.conn.execute("""
+        SELECT f->>'symbol' FROM meta.ingestion, jsonb_array_elements(failure_detail) f
+        WHERE batch_id = %s AND f->>'error_type' = ANY(%s)""", (batch_id, list(TRANSIENT_ERRORS))).fetchall()]
 
 
 def run_job(name: str, endpoint: str, params: dict | None, symbols: list[str], *, store: MetaStore,
@@ -152,6 +165,7 @@ def run_job(name: str, endpoint: str, params: dict | None, symbols: list[str], *
             result.failed_batches.append(str(e)[:200])
             continue
         result.batches.append(batch_id)
+        result.transient_failures += transient_failures(store, batch_id)
         if clean:
             try:
                 from pipelines.clean_runner import run_clean

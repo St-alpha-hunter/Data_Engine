@@ -1,7 +1,7 @@
 """
 ### 每日流程（美股收盘后）
 
-北京时间周二到周六早上 8 点运行，处理**纽约前一天**的交易日（换算见 `pipelines/daily.py` 的 `trade_date_for`）；
+北京时间周二到周六早上 10 点运行，处理**纽约前一天**的交易日（换算见 `pipelines/daily.py` 的 `trade_date_for`）；
 那天不是美股交易日（周末、假日）→ 整个流程跳过。
 
 | 步骤 | 做什么 |
@@ -42,7 +42,7 @@ def _trade_date(value: str) -> date:
 
 
 @dag(
-    schedule=CronTriggerTimetable("0 8 * * 2-6", timezone="Asia/Shanghai"),
+    schedule=CronTriggerTimetable("0 10 * * 2-6", timezone="Asia/Shanghai"),
     start_date=pendulum.datetime(2026, 10, 13, tz="Asia/Shanghai"),
     catchup=False,                     # 不自动补历史；需要补哪几天用 airflow backfill 指定
     max_active_runs=1,                 # 同一时间只跑一天，补跑时按日期顺序一天一天来

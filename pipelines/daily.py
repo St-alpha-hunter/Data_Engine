@@ -2,7 +2,7 @@
 每日增量：Airflow 每天调用（也可以手动跑）
 
 日期一律由调用方传入，不用 date.today()：
-    Airflow 的执行时间（北京时间早上 8 点）→ 换成纽约时间的日期 = 要处理的美股交易日（trade_date）
+    Airflow 的执行时间（北京时间早上 10 点）→ 换成纽约时间的日期 = 要处理的美股交易日（trade_date）
     不是交易日（周末、美股假日）→ 整个流程跳过
 所以补跑过去某一天，和当天跑的结果一样（幂等）；每一步都可以重复执行：
     拉取：同一个 (接口, 参数) 已经写进 raw 的股票自动跳过（参数里带 trade_date，所以每天是新的任务）
@@ -46,7 +46,7 @@ PRICE_JOBS = {"price_unadjusted": "price_volume_unadjusted",   # golden 主数�
 def trade_date_for(logical: datetime, conn) -> date | None:
     """
     执行时间 → 要处理的美股交易日：换成纽约时间取日期；那天不是交易日返回 None（整个流程跳过）
-    北京时间早上 8 点 = 纽约前一天晚上 8 点（夏令时）/ 7 点（冬令时），都在收盘之后
+    北京时间早上 10 点 = 纽约前一天晚上 10 点（夏令时）/ 9 点（冬令时），都在收盘之后
     """
     if logical.tzinfo is None:
         raise ValueError("执行时间必须带时区")

@@ -57,7 +57,7 @@ docker compose exec airflow-scheduler airflow dags test healthcheck
 
 | DAG | 何时运行（北京时间） | 做什么 | 大约用时 |
 |---|---|---|---|
-| `daily_eod` | 周二到周六 10:00 | 事件 → 证券主表维护 → 回填 security_id，和日线最近 7 天并行 → golden → 汇总提醒 | 25–30 分钟 |
+| `daily_eod` | 周二到周六 10:00 | 事件 → 证券主表维护 → 回填 security_id，和日线最近 7 天并行 → golden → 湖仓（Delta，见 `docs/lakehouse.md`）→ 汇总提醒 | 25–30 分钟 |
 | `weekly_fundamentals` | 周六 10:00 | 三张报表（年报最近 3 期、季报最近 8 期）、比率、企业价值、市值（最近两周）、一致预期、评级 → raw → 清洗 | 约 1 小时 |
 | `monthly_reference` | 每月 1 号 12:00 | 公司概况；证券主表 vs SEC 代码表核对；交易日历更新 + FMP 节假日核对 | 约 10 分钟 |
 | `healthcheck` | 不定时，手动 | 容器里能否导入项目代码、连上 PostgreSQL / ClickHouse / FMP、读中间态 | 1 分钟 |

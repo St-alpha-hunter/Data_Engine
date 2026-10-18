@@ -36,3 +36,6 @@ data/airflow/
 
 
 *.jsonl
+
+# 湖仓（Delta 表：parquet + _delta_log，数据不进 git）
+data/lakehouse/

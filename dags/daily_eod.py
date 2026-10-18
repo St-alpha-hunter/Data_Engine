@@ -12,6 +12,7 @@
 | backfill_security_id | 新事件回填 security_id |
 | ingest_prices | 日线（不复权 + 复权）最近 7 天 → raw → 清洗 |
 | load_golden | 新批次 → golden；重算复权因子；和 FMP 核对 |
+| export_lakehouse | golden → 湖仓（Delta Lake，`data/lakehouse/`）增量 MERGE；每周合并小文件；导完和 golden 核对（见 `pipelines/lakehouse.py`） |
 | summarize_and_alert | 当天的批次、问题、隔离统计；有问题就提醒（见 `pipelines/alerts.py`） |
 
 事件（load_events → maintain_securities → backfill_security_id）和日线（ingest_prices）两条线**并行**，一条失败不挡另一条；
@@ -94,13 +95,20 @@ def daily_eod():
         out = run(_trade_date(d))
         return {"batches": out["batches"], "check": out["check"]}       # XCom 只放小的汇总
 
+    @task
+    def export_lakehouse() -> dict:
+        """golden → 湖仓（Delta）：增量 MERGE、每周合并小文件，导完和 golden 核对"""
+        from pipelines.lakehouse import export_all
+        return export_all()
+
     @task(retries=0, trigger_rule="all_done")
-    def summarize_and_alert(d: str) -> dict:
+    def summarize_and_alert(d: str, lake: dict | None) -> dict:
         """汇总 + 提醒：有批次失败 → 任务标红；其他问题只记录（data/alerts/alerts.jsonl）"""
         from pipelines.alerts import check
         from pipelines.daily import summarize
         ctx = get_current_context()
         summary = summarize(_trade_date(d), ctx["dag_run"].start_date)
+        summary["checks"] = (lake or {}).get("checks", [])        # 湖仓和 golden 不一致 → 提醒
         alerts = check("daily_eod", ctx["run_id"], summary)
         if any(a["level"] == "error" for a in alerts):
             raise RuntimeError("; ".join(a["message"] for a in alerts if a["level"] == "error"))
@@ -115,7 +123,9 @@ def daily_eod():
     prices = ingest_prices(d)
     golden = load_golden(d)
     events >> securities >> ids
-    [ids, prices] >> golden >> summarize_and_alert(d)
+    lake = export_lakehouse()
+    [ids, prices] >> golden >> lake
+    summarize_and_alert(d, lake)
 
 
 daily_eod()

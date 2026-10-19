@@ -169,7 +169,7 @@ def load_golden(trade_date: date, *, store: MetaStore | None = None, ch: ClickHo
 # =========================
 # 各流程用到的接口：汇总只统计自己流程的批次（几个流程同时运行时不会把别人的失败算到自己头上）
 DAILY_ENDPOINTS = ["price_volume", "price_volume_unadjusted", "symbol_change", "sp500_github", "mergers_acquisitions",
-                   "dividends_calendar", "splits_calendar", "dividends", "splits", "profile"]
+                   "dividends_calendar", "splits_calendar", "dividends", "splits", "profile", "price_5min"]
 
 
 def summarize(trade_date: date, since: datetime, *, store: MetaStore | None = None,

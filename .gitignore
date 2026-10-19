@@ -39,3 +39,6 @@ data/airflow/
 
 # 湖仓（Delta 表：parquet + _delta_log，数据不进 git）
 data/lakehouse/
+
+# 临时脚本 / 日志
+data/tmp/

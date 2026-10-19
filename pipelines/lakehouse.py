@@ -74,6 +74,10 @@ TABLES = {
 }
 
 
+# 不是从 golden 导出的湖表（分钟线 demo：bronze 由 pipelines/intraday.py 写，silver 由 spark_jobs/bars.py 写），connect() 一起挂上
+OTHER_TABLES = ["bars_5min", "bars"]
+
+
 # =========================
 # 位置
 # =========================
@@ -286,11 +290,11 @@ def export_all(*, ch: ClickHouseStore | None = None, db: str = GOLDEN_DB, base: 
 # =========================
 def connect(version: dict | None = None, base: str | None = None) -> duckdb.DuckDBPyConnection:
     """
-    DuckDB 连接，三张表注册成同名视图；version={"price_daily": 3} 可以回看某个版本（时间旅行）
+    DuckDB 连接，湖里的表（golden 导出的三张 + 分钟线 bars_5min / bars）注册成同名视图；version={"price_daily": 3} 可以回看某个版本（时间旅行）
         con = connect(); con.sql("SELECT * FROM price_daily WHERE security_id = 1 ORDER BY date DESC LIMIT 5")
     """
     con = duckdb.connect()
-    for name in TABLES:
+    for name in [*TABLES, *OTHER_TABLES]:
         dt = open_table(name, base, (version or {}).get(name))
         if dt is not None:
             con.register(name, dt.to_pyarrow_dataset())

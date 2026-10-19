@@ -12,10 +12,13 @@
 | backfill_security_id | 新事件回填 security_id |
 | ingest_prices | 日线（不复权 + 复权）最近 7 天 → raw → 清洗 |
 | load_golden | 新批次 → golden；重算复权因子；和 FMP 核对 |
+| fetch_intraday | 5 分钟线 → 湖的 bronze（`pipelines/intraday.py`） |
+| publish_intraday | 这一天的 5 分钟线推进 Kafka；常驻的 Spark 流任务消费：清洗校验 → 合成 15min / 1h / 1d → 湖的 silver |
+| sync_intraday | 等 Spark 处理完 → 质量问题 / 隔离写 meta → 通过校验的同步进 ClickHouse `golden.bars_intraday`（`pipelines/intraday_sync.py`） |
 | export_lakehouse | golden → 湖仓（Delta Lake，`data/lakehouse/`）增量 MERGE；每周合并小文件；导完和 golden 核对（见 `pipelines/lakehouse.py`） |
 | summarize_and_alert | 当天的批次、问题、隔离统计；有问题就提醒（见 `pipelines/alerts.py`） |
 
-事件（load_events → maintain_securities → backfill_security_id）和日线（ingest_prices）两条线**并行**，一条失败不挡另一条；
+事件（load_events → maintain_securities → backfill_security_id）、日线（ingest_prices）、5 分钟线（fetch → publish → sync）三条线**并行**，一条失败不挡另一条；
 load_golden 和汇总在两条线都结束后运行（不管成败）。
 
 **每一步都可以重跑**（幂等）：失败自动重试 4 次，间隔逐次翻倍（10、20、40、60 分钟，能扛过两个多小时的断网）；
@@ -101,6 +104,22 @@ def daily_eod():
         from pipelines.lakehouse import export_all
         return export_all()
 
+    @task(pool=FMP_POOL)
+    def fetch_intraday(d: str) -> dict:
+        from pipelines.intraday import fetch_day
+        return fetch_day(_trade_date(d))
+
+    @task
+    def publish_intraday(d: str) -> dict:
+        from pipelines.intraday_sync import publish_day
+        return publish_day(_trade_date(d))
+
+    @task
+    def sync_intraday(d: str) -> dict:
+        from pipelines.intraday_sync import sync_day, wait_stream
+        wait_stream()
+        return sync_day(_trade_date(d))
+
     @task(retries=0, trigger_rule="all_done")
     def summarize_and_alert(d: str, lake: dict | None) -> dict:
         """汇总 + 提醒：有批次失败 → 任务标红；其他问题只记录（data/alerts/alerts.jsonl）"""
@@ -125,7 +144,9 @@ def daily_eod():
     events >> securities >> ids
     lake = export_lakehouse()
     [ids, prices] >> golden >> lake
-    summarize_and_alert(d, lake)
+    intraday = sync_intraday(d)
+    fetch_intraday(d) >> publish_intraday(d) >> intraday
+    [lake, intraday] >> summarize_and_alert(d, lake)
 
 
 daily_eod()

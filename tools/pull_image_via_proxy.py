@@ -43,16 +43,25 @@ def download_blob(session, repo, digest, headers, dest: Path):
         print(f"  已有 {digest[:19]}")
         return
     tmp = dest.with_suffix(".part")
-    with session.get(f"{REGISTRY}/v2/{repo}/blobs/{digest}", headers=headers, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length", 0))
-        done = 0
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(1 << 20):
-                f.write(chunk)
-                done += len(chunk)
-        print(f"  下载 {digest[:19]}  {done / 1e6:.1f} MB" + (f" / {total / 1e6:.1f} MB" if total else ""))
+    # 断点续传：代理连接经常中途断开，大的层每次从头下永远下不完 → 接着 .part 已有的字节用 Range 请求剩下的
+    for attempt in range(1, 21):
+        have = tmp.stat().st_size if tmp.exists() else 0
+        h = {**headers, "Range": f"bytes={have}-"} if have else headers
+        try:
+            with session.get(f"{REGISTRY}/v2/{repo}/blobs/{digest}", headers=h, stream=True, timeout=600) as r:
+                if r.status_code == 416:                 # 已经下完了
+                    break
+                r.raise_for_status()
+                resumed = r.status_code == 206           # 服务器不支持续传时返回 200 和完整内容，只能从头写
+                with open(tmp, "ab" if resumed else "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+            break
+        except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
+            print(f"  {digest[:19]} 连接中断（第 {attempt} 次），已下 {tmp.stat().st_size / 1e6:.1f} MB，续传：{type(e).__name__}")
+    print(f"  下载 {digest[:19]}  {tmp.stat().st_size / 1e6:.1f} MB")
     if "sha256:" + hashlib.sha256(tmp.read_bytes()).hexdigest() != digest:
+        tmp.unlink()
         raise RuntimeError(f"{digest} 校验失败，重跑会重新下载")
     tmp.replace(dest)
 

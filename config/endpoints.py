@@ -43,6 +43,18 @@ FMP_ENDPOINTS = {
         "max_rows": 5000,
         "chunk_days": 3650
     },
+    # 5 分钟线（常规交易时段 9:30–16:00，时间是纽约当地时间，K 线开始时刻）；Kafka + Spark 合成 demo 用
+    # 不进 ClickHouse raw，直接写湖的 bronze 层（lakehouse/bars_5min，见 pipelines/intraday.py）
+    # 单次只返回约 8 个交易日（超出的静默截掉更早的）：按 7 天一段请求（最多 5 个交易日 = 390 根），顶到 600 根就拆开重拉
+    # 套餐（Starter）没有 1 分钟线；带宽每 30 天 20 GB，别拉长历史
+    "price_5min": {
+        "url": "https://financialmodelingprep.com/stable/historical-chart/5min?symbol={symbol}&from={from_date}&to={to_date}&apikey={apikey}",
+        "required_params": ["from_date", "to_date"],
+        "source_logic_version": 1,
+        "bronze_table": "bars_5min",
+        "max_rows": 600,
+        "chunk_days": 7
+    },
     # 历史市值（每天一行）；原来的 market-capitalization 只返回今天一行，字段相同
     # 和日线一样有单次 5000 行上限，按 10 年一段请求
     "market_cap": {

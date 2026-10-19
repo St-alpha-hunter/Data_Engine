@@ -59,6 +59,7 @@ services:
       POSTGRES_PORT: "5432"
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
+      KAFKA_BOOTSTRAP: kafka:9092                       # 5 分钟线推进 Kafka（publish_intraday）
       PYTHONPATH: /opt/airflow/project
     volumes:
       - .:/opt/airflow/project
@@ -120,6 +121,64 @@ services:
       - clickhouse
     restart: unless-stopped
 
+  # ===================== 流处理：Kafka + Spark（常驻；每日流程的 5 分钟线经过这里）=====================
+  # 流程见 docs/streaming.md：5 分钟线推进 Kafka → Spark Structured Streaming 清洗校验、合成 15min / 1h / 1d → 湖的 silver
+  # 两个服务合计约 2–3.5 GB 内存，只在本地跑（云上 4G 的机器不放）
+  #
+  # Kafka 3.9.1，KRaft 模式（自己选主，不需要 ZooKeeper），单节点
+  #   容器之间（Spark、Airflow）连 kafka:9092；本机（回放程序）连 localhost:9094
+  #   数据卷 kafka_data：重启不丢消息（Spark 流任务的检查点记着读到了哪）；消息保留 7 天
+  kafka:
+    image: apache/kafka:3.9.1
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"         # 主题由回放程序按约定的分区数创建，拼错名字不会悄悄建一个新的
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+
+  # Spark 3.5.8 + Delta 3.3.2（镜像 docker/spark/Dockerfile），单机 local[*] 模式
+  # 容器一启动就跑流任务 spark_jobs/bars.py stream（挂了自动重启，检查点保证接着上次读）；Spark 网页 http://localhost:4040
+  # 其他任务（verify / rebuild / selftest）用 docker compose exec spark /opt/spark/bin/spark-submit … 另外提交
+  # 读交易日历用只读账号 superset_ro（只有 ref 等 schema 的读权限）；质量问题由 Airflow 的 sync_intraday 写 meta，Spark 不写数据库
+  spark:
+    build: ./docker/spark
+    image: data-engine-spark:3.5.8
+    command: ["/opt/spark/bin/spark-submit", "--driver-memory", "2g", "spark_jobs/bars.py", "stream"]
+    working_dir: /opt/project
+    ports:
+      - "4040:4040"
+    environment:
+      PYTHONPATH: /opt/project
+      LAKEHOUSE_DIR: /opt/project/data/lakehouse
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      PG_RO_USER: superset_ro
+      PG_RO_PASSWORD: ${SUPERSET_RO_PASSWORD}
+    volumes:
+      - .:/opt/project
+    depends_on:
+      - kafka
+      - postgres
+    restart: unless-stopped
+
 volumes:
+  kafka_data:
   clickhouse_data:
   postgres_data:

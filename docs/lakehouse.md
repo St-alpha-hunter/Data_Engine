@@ -1,7 +1,7 @@
 # 湖仓层（Delta Lake + DuckDB）
 
 golden 在 ClickHouse 里生成；每天导出一份到 **Delta Lake 开放表格式**，用 **DuckDB** 查询。
-以后 Spark 合成分钟线、上云（GCS）都建立在这一层上。
+以后 Spark 合成分钟线（见 `docs/streaming.md`）、上云（GCS）都建立在这一层上。
 
 代码：`pipelines/lakehouse.py`；演示：`python tools/lakehouse_demo.py [代码]`；测试：`test/test_lakehouse.py`。
 

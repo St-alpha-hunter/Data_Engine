@@ -58,7 +58,9 @@ DATASETS = {
     "DAG 运行": ("Airflow 元数据库", """
         SELECT dag_id, run_id, run_type, state, start_date, end_date,
                round(extract(epoch FROM end_date - start_date)::numeric / 60, 1) AS minutes
-        FROM dag_run WHERE start_date IS NOT NULL"""),
+        FROM dag_run
+        -- 去掉结束早于开始的记录（测试时指定了未来执行日期的运行，开始时间被记成那个日期）
+        WHERE start_date IS NOT NULL AND (end_date IS NULL OR end_date >= start_date)"""),
     "任务运行": ("Airflow 元数据库", """
         SELECT dag_id, task_id, run_id, state, try_number, start_date, end_date,
                round((duration / 60)::numeric, 1) AS minutes
@@ -213,6 +215,7 @@ def query_object(viz: str, fd: dict) -> dict:
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")               # Windows 控制台默认 GBK，打印 ✅ 会报错
     ss = Superset(BASE, "admin", ENV["SUPERSET_ADMIN_PASSWORD"])
     db_ids = {name: ss.upsert("database", "database_name", name,
                               {"database_name": name, "sqlalchemy_uri": uri, "expose_in_sqllab": True})

@@ -83,10 +83,14 @@ docker compose exec airflow-scheduler airflow dags test healthcheck
 
 每个 DAG 最后一步 `summarize_and_alert` 汇总这次运行的批次、问题、隔离、事件修订，按规则提醒：
 
+事件修订分三类（2026-10-21 查清：之前一天两百多条"修订"几乎都不是问题）：
+`event_revisions` 股票池里内容真的变了（提醒用）；`event_status_changes` 只是除息日到了、状态 announced → confirmed（正常生命周期）；
+`event_revisions_other` 股票池外的内容变化（分红日历是全市场的，外国 OTC 股票按当天汇率折成美元，金额天天微调）。
+
 | 级别 | 情况 | 效果 |
 |---|---|---|
-| error | 有拉取批次失败；任何任务重试用完最终失败（`on_failure_callback`） | 记录；汇总任务**标红** |
-| warning | 新增 danger 问题（数据被隔离）；事件修订 > 20 条（正常接近 0）；和 FMP 复权价核对的问题比上次多；月度核对发现主表和 SEC 不一致、交易日历和 FMP 不一致 | 只记录 |
+| error | 暂时性失败（网络 / 限流 / 服务端错误）到最后仍没补上的代码（中途失败、重试补齐的不算）；任何任务重试用完最终失败（`on_failure_callback`） | 记录；汇总任务**标红** |
+| warning | 中途拉取失败但重试补齐了（网络不稳）；部分代码永久性失败（如 402）；新增 danger 问题（数据被隔离）；股票池里的事件**内容**修订 > 20 条（正常每天几条；只是状态变化 announced → confirmed、股票池外的不算，见下）；和 FMP 复权价核对的问题比上次多；月度核对发现主表和 SEC 不一致、交易日历和 FMP 不一致 | 只记录 |
 
 记录位置：`data/alerts/alerts.jsonl`（每条一行 JSON）、调度器日志；每次的汇总在 `data/alerts/summaries.jsonl`（用来和上一次比较）。
 以后接邮件 / Slack 只改 `notify()`。

@@ -46,10 +46,22 @@ def evaluate(flow: str, summary: dict, previous: dict | None = None) -> list[dic
     """汇总 → 提醒列表 [{level, code, message}]"""
     alerts = []
     batches = summary.get("batches", {})
-    if batches.get("failed"):
+    if "unresolved" in summary:
+        # 只有暂时性失败、到现在还没补上的才标红；中途失败但重试补齐了的只提醒（说明网络不稳）
+        unresolved = summary["unresolved"]
+        if unresolved:
+            n = sum(len(v) for v in unresolved.values())
+            detail = "；".join(f"{ep} {len(v)} 个（{', '.join(v[:5])}{' …' if len(v) > 5 else ''}）" for ep, v in unresolved.items())
+            alerts.append({"level": "error", "code": "batch_failed",
+                           "message": f"有 {n} 个代码 / 请求因网络等原因最终没拉到：{detail}；重跑对应任务会自动补拉"})
+        elif batches.get("failed") or batches.get("partial"):
+            alerts.append({"level": "warning", "code": "batch_recovered",
+                           "message": f"有 {batches.get('failed', 0) + batches.get('partial', 0)} 个批次中途拉取失败，"
+                                      f"重试后已补齐（网络不稳？）"})
+    elif batches.get("failed"):                                  # 旧格式的汇总（没有 unresolved）
         alerts.append({"level": "error", "code": "batch_failed",
                        "message": f"有 {batches['failed']} 个拉取批次失败，数据可能不全；重跑这个任务会自动补拉失败的部分"})
-    if batches.get("partial"):
+    if batches.get("partial") and "unresolved" not in summary:
         alerts.append({"level": "warning", "code": "batch_partial",
                        "message": f"有 {batches['partial']} 个批次部分股票拉取失败（多为个别股票 402 / 超时）"})
     danger = summary.get("issues", {}).get("danger", 0)
@@ -59,7 +71,7 @@ def evaluate(flow: str, summary: dict, previous: dict | None = None) -> list[dic
     revisions = summary.get("event_revisions", 0)
     if revisions > EVENT_REVISION_LIMIT:
         alerts.append({"level": "warning", "code": "event_revisions",
-                       "message": f"新增 {revisions} 条事件修订（正常应接近 0）：可能数据源字段在变，或者整理时顺序不固定"})
+                       "message": f"股票池里新增 {revisions} 条事件内容修订（正常每天几条）：可能数据源字段在变，或者整理时顺序不固定"})
     if previous and "gd001_total" in summary and summary["gd001_total"] > previous.get("gd001_total", 0):
         alerts.append({"level": "warning", "code": "gd001_increase",
                        "message": f"和 FMP 复权价核对的问题从 {previous['gd001_total']} 条增加到 {summary['gd001_total']} 条，"

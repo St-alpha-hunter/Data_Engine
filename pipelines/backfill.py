@@ -166,7 +166,9 @@ def run_job(name: str, endpoint: str, params: dict | None, symbols: list[str], *
             continue
         result.batches.append(batch_id)
         result.transient_failures += transient_failures(store, batch_id)
-        if clean:
+        if clean and store.get_ingestion(batch_id)["status"] == "failed":
+            log.warning(f"[{name}] 批次 {batch_id} 整批拉取失败、没有数据，跳过清洗")
+        elif clean:
             try:
                 from pipelines.clean_runner import run_clean
                 run_clean(batch_id, store=store, ch=ch)

@@ -42,3 +42,6 @@ data/lakehouse/
 
 # 临时脚本 / 日志
 data/tmp/
+
+# Spark 自动建的空目录
+spark-warehouse/

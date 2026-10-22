@@ -98,3 +98,52 @@ def test_endpoint_lists_are_known():
     from config.endpoints import FMP_ENDPOINTS
     for ep in daily.DAILY_ENDPOINTS + periodic.WEEKLY_ENDPOINTS + periodic.MONTHLY_ENDPOINTS:
         assert ep in FMP_ENDPOINTS or ep in {"sp500_github"}, ep
+
+
+# =========================
+# ✅ 汇总只把"最后仍没补上"的暂时性失败标红（2026-10-21：重试补齐了还被算成失败）
+# =========================
+def test_unresolved_failures_ignore_recovered(store, monkeypatch):
+    since = datetime.now(timezone.utc) - timedelta(minutes=1)
+    batch(store, "symbol_change", [("ALL", "request_error")], symbols=("ALL",))      # 事件类：先失败……
+    batch(store, "symbol_change", symbols=("ALL",))                                # ……重试成功 → 已补上
+    batch(store, "mergers_acquisitions", [("0", "timeout")], symbols=("0",))       # 没再成功 → 没补上
+    batch(store, "price_volume", [("AAPL", "timeout"), ("MSFT", "timeout"), ("XYZ", "not_found")], symbols=("AAPL", "MSFT", "XYZ", "IBM"))
+    monkeypatch.setattr(daily, "done_symbols", lambda store, ch, ep, params: {"AAPL"})   # 重试时 AAPL 写进了 raw
+    out = daily.unresolved_failures(store, since, daily.DAILY_ENDPOINTS, ch=object())
+    assert out == {"mergers_acquisitions": ["0"], "price_volume": ["MSFT"]}          # XYZ 是永久性失败，不算
+
+
+def test_alerts_recovered_is_warning_unresolved_is_error():
+    from pipelines import alerts
+    base = {"batches": {"success": 10, "failed": 3}, "issues": {}}
+    assert [(a["level"], a["code"]) for a in alerts.evaluate("daily_eod", {**base, "unresolved": {}})] == \
+        [("warning", "batch_recovered")]
+    got = alerts.evaluate("daily_eod", {**base, "unresolved": {"price_volume": ["MSFT"]}})
+    assert got[0]["level"] == "error" and "MSFT" in got[0]["message"]
+
+
+# =========================
+# ✅ 事件修订分三类：只有"股票池里、内容变了"的才提醒（2026-10-21：一天两百多条几乎全是状态变化和池外股票）
+# =========================
+def test_event_revision_counts(store):
+    import json as _json
+    b = batch(store, "dividends_calendar", symbols=("2026-10-16",))
+    sid = store.conn.execute("INSERT INTO ref.securities (name, security_type) VALUES ('X', 'common_stock') "
+                             "RETURNING security_id").fetchone()[0]
+
+    def rec(key, symbol, status, payload):
+        return store.conn.execute(
+            "SELECT event_id FROM events.record_event('dividend', %s, '2026-10-16', %s, 'fmp', %s, %s, %s, NULL, now())",
+            (symbol, status, key, b, _json.dumps(payload))).fetchone()[0]
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=1)
+    e = rec("IN|1", "IN", "announced", {"dividend": 1.0})
+    store.conn.execute("UPDATE events.corporate_events SET security_id = %s WHERE event_id = %s", (sid, e))
+    rec("IN|1", "IN", "confirmed", {"dividend": 1.0})                  # 只是状态变了
+    rec("IN|1", "IN", "confirmed", {"dividend": 1.1})                  # 内容变了（新修订没有 security_id，回填前）
+    store.conn.execute("UPDATE events.corporate_events SET security_id = %s WHERE source_event_key = 'IN|1'", (sid,))
+    rec("OUT|1", "OUTF", "announced", {"dividend": 0.0370})
+    rec("OUT|1", "OUTF", "announced", {"dividend": 0.0371})            # 池外、汇率微调
+    assert daily.event_revision_counts(store, since) == \
+        {"event_revisions": 1, "event_status_changes": 1, "event_revisions_other": 1}

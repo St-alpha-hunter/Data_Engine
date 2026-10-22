@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 from db import ClickHouseStore, MetaStore
 from pipelines import event_loader, event_security_backfill, golden_loader, security_maintenance
-from pipelines.backfill import HISTORY_START, build_universe, run_job
+from pipelines.backfill import HISTORY_START, TRANSIENT_ERRORS, build_universe, done_symbols, run_job
 
 log = logging.getLogger(__name__)
 
@@ -172,8 +172,67 @@ DAILY_ENDPOINTS = ["price_volume", "price_volume_unadjusted", "symbol_change", "
                    "dividends_calendar", "splits_calendar", "dividends", "splits", "profile", "price_5min"]
 
 
+def unresolved_failures(store: MetaStore, since: datetime, endpoints: list[str],
+                        ch: ClickHouseStore | None = None) -> dict[str, list[str]]:
+    """
+    这次运行里暂时性失败（网络 / 限流 / 服务端错误）、到现在还没补上的：{接口: [代码 / 请求单位]}
+    任务失败重试时，断点续跑会补拉失败的部分；之前失败的批次记录还在，只数批次状态会把已经补上的也算成失败
+        有 raw 表 / bronze 表的接口：失败的代码后来写进去了（和断点续跑同一个判断）→ 已补上
+        其他（事件类，每次都请求全部）：之后同样参数有成功的批次 → 已补上
+    永久性失败（如套餐不支持的代码 402）不在这里：它们每天都会失败，只作提醒
+    """
+    from config.endpoints import FMP_ENDPOINTS
+    rows = store.conn.execute("""
+        SELECT endpoint, params::text, started_at,
+               ARRAY(SELECT f->>'symbol' FROM jsonb_array_elements(failure_detail) f
+                     WHERE f->>'error_type' = ANY(%s)) AS transient
+        FROM meta.ingestion
+        WHERE started_at >= %s AND endpoint = ANY(%s) AND status IN ('failed', 'partial')""",
+        (list(TRANSIENT_ERRORS), since, endpoints)).fetchall()
+    groups: dict[tuple[str, str], tuple[set, datetime]] = {}
+    for ep, params, started, transient in rows:
+        if transient:
+            failed, first = groups.get((ep, params), (set(), started))
+            groups[(ep, params)] = (failed | set(transient), min(first, started))
+    out = {}
+    for (ep, params), (failed, first) in groups.items():
+        cfg = FMP_ENDPOINTS.get(ep, {})
+        if cfg.get("raw_table"):
+            ch = ch or ClickHouseStore()
+            left = failed - done_symbols(store, ch, ep, json.loads(params))
+        elif cfg.get("bronze_table"):
+            from pipelines.intraday import done_symbols as bronze_done
+            left = failed - bronze_done(store, json.loads(params))
+        else:
+            recovered = store.conn.execute("""
+                SELECT 1 FROM meta.ingestion WHERE endpoint = %s AND params::text = %s AND started_at > %s
+                AND status = 'success' LIMIT 1""", (ep, params, first)).fetchone()
+            left = set() if recovered else failed
+        if left:
+            out[ep] = sorted(left)
+    return out
+
+
+def event_revision_counts(store: MetaStore, since: datetime) -> dict:
+    """
+    since 以来的事件修订，分三类（2026-10-21 查清：之前一天两百多条"修订"几乎都不是问题）
+        event_revisions        股票池里的、内容真的变了 → 只有这个用来提醒（正常每天几条）
+        event_status_changes   只是状态变了（除息日到了：announced → confirmed），正常的生命周期，每天几十到上百
+        event_revisions_other  股票池外的内容变化：分红日历是全市场的，外国 OTC 股票按当天汇率折成美元，金额天天微调
+    """
+    row = store.conn.execute("""
+        SELECT count(*) FILTER (WHERE n.security_id IS NOT NULL AND o.payload IS DISTINCT FROM n.payload),
+               count(*) FILTER (WHERE o.payload IS NOT DISTINCT FROM n.payload),
+               count(*) FILTER (WHERE n.security_id IS NULL AND o.payload IS DISTINCT FROM n.payload)
+        FROM events.corporate_events n
+        LEFT JOIN events.corporate_events o ON o.source = n.source AND o.source_event_key = n.source_event_key
+             AND o.revision = n.revision - 1
+        WHERE n.revision > 1 AND n.known_at >= %s""", (since,)).fetchone()
+    return dict(zip(["event_revisions", "event_status_changes", "event_revisions_other"], row))
+
+
 def summarize(trade_date: date, since: datetime, *, store: MetaStore | None = None,
-              endpoints: list[str] | None = None) -> dict:
+              endpoints: list[str] | None = None, ch: ClickHouseStore | None = None) -> dict:
     """
     since 之后（这次运行开始以来）、属于 endpoints 这些接口的批次、问题；隔离区和核对问题是全局的当前数
     新增事件修订数用来监控 FMP 字段是否每天在变
@@ -189,8 +248,8 @@ def summarize(trade_date: date, since: datetime, *, store: MetaStore | None = No
                             WHERE i.started_at >= %s AND i.endpoint = ANY(%s) GROUP BY 1""", since, endpoints)),
         "gd001_total": q("SELECT count(*) FROM meta.quality_issues WHERE rule_id = 'GD001'")[0][0],
         "quarantine_pending": q("SELECT count(*) FROM meta.quarantine_records WHERE status = 'pending'")[0][0],
-        "event_revisions": q("SELECT count(*) FROM events.corporate_events WHERE revision > 1 AND known_at >= %s",
-                             since)[0][0],
+        **event_revision_counts(store, since),
+        "unresolved": unresolved_failures(store, since, endpoints, ch),
     }
     log.info(f"[daily] 汇总：{json.dumps(out, ensure_ascii=False)}")
     return out

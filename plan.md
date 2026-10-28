@@ -30,3 +30,7 @@ c. source_logic_version(版本号，以后如果fmp更改了计算逻辑，我�
 d. batch_id（对应版本拉取数据的批次）
 e, quality status(标记 health, warning, danger, 按照数据质量去标记读，读的时候只读health和warning)。 
 f, 对于补跑的数据，最好是追加新版，而不是删除旧版重跑。 数据默认只读quality status为health的版本
+
+
+
+

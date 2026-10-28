@@ -29,10 +29,12 @@ load_golden 和汇总在两条线都结束后运行（不管成败）。
 from datetime import date, timedelta
 
 import pendulum
-from airflow.sdk import Param, dag, get_current_context, task
+from airflow.sdk import Asset, Param, dag, get_current_context, task
 from airflow.timetables.trigger import CronTriggerTimetable
 
+
 FMP_POOL = "fmp"
+EOD_READY = Asset("x-fmdp://local/daily-eod-ready")
 
 
 def _alert_on_failure(context):
@@ -133,20 +135,52 @@ def daily_eod():
             raise RuntimeError("; ".join(a["message"] for a in alerts if a["level"] == "error"))
         return {"summary": summary, "alerts": alerts}
 
+    @task(
+        outlets=[EOD_READY],
+        retries=0,
+        trigger_rule="all_success"
+    )
+    def mark_eod_ready():
+        """All critical EOD tasks succeeded. Publish asset event."""
+        print("Daily EOD completed successfully.")
+        print("ClickHouse snapshot is ready to export.")
+
     # 两条线并行：事件 → 证券主表 → 回填 security_id；日线。一条线失败不挡另一条（之前事件来源连不上，日线也没拉）
     # 两条线都请求 FMP，资源池保证同一时间只有一个在请求
     d = trade_date()
+
+     # 1. Events pipeline
     events = load_events(d)
     securities = maintain_securities(d)
     ids = backfill_security_id(d)
-    prices = ingest_prices(d)
-    golden = load_golden(d)
+
     events >> securities >> ids
+
+    # 2. Daily prices pipeline
+    prices = ingest_prices(d)
+
+    # 3. Golden + Delta Lake
+    golden = load_golden(d)
     lake = export_lakehouse()
+
     [ids, prices] >> golden >> lake
+
+    # 4. Intraday pipeline
+    fetched = fetch_intraday(d)
+    published = publish_intraday(d)
     intraday = sync_intraday(d)
-    fetch_intraday(d) >> publish_intraday(d) >> intraday
-    [lake, intraday] >> summarize_and_alert(d, lake)
+
+    fetched >> published >> intraday
+
+    # 5. Summary
+    summary = summarize_and_alert(d, lake)
+
+    [lake, intraday] >> summary
+
+        # 6. Final readiness signal
+    ready = mark_eod_ready()
+
+    [ids, prices, lake, intraday, summary] >> ready
 
 
 daily_eod()

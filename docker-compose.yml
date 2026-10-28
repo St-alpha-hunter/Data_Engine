@@ -54,6 +54,14 @@ services:
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
       AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Shanghai
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp-adc.json
+      GOOGLE_CLOUD_PROJECT: project-311b5e7b-05a8-4153-bd2
+
+      FMDP_CLICKHOUSE_URL: http://clickhouse:8123
+      FMDP_CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      FMDP_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      FMDP_GCS_BUCKET: financial-market-data-2026-10-25
       # 容器里连数据库用容器名和容器内端口（覆盖 .env 里给本机用的 localhost:5433）
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
@@ -65,6 +73,7 @@ services:
       - .:/opt/airflow/project
       - ./dags:/opt/airflow/dags
       - ./data/airflow/logs:/opt/airflow/logs
+      - "C:/Users/K.Hawk/AppData/Roaming/gcloud/application_default_credentials.json:/opt/airflow/gcp-adc.json:ro"
     depends_on:
       - postgres
       - clickhouse
